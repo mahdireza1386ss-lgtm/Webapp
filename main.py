@@ -28,6 +28,10 @@ from telegram.ext import (
     ConversationHandler,
 )
 
+# --- تولید لایسنس اختصاصی ---
+def generate_license_key():
+    return f"BARANLINK-{str(uuid.uuid4())[:8].upper()}-{str(uuid.uuid4())[:8].upper()}"
+
 # --- غیرفعال‌سازی هشدارهای امنیتی SSL ---
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -48,7 +52,7 @@ PORT      = int(os.getenv("PORT", 8000))
 # کلید امنیتی API — در Railway به عنوان Secret تنظیم کنید
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 
-IRAN_PROXY = os.getenv("IRAN_PROXY", "http://6f05828d954209c18b50__cr.ir:93cc122d6b59f8d8@gw.dataimpulse.com:823")
+IRAN_PROXY = os.getenv("IRAN_PROXY", "")
 SNAPPFOOD_PROXIES = {
     "http": IRAN_PROXY,
     "https": IRAN_PROXY
@@ -80,29 +84,29 @@ BASE_HEADERS = {
 app = FastAPI(title="Baran Token API", docs_url=None, redoc_url=None)
 
 
-@app.get("/api/BaranToken/{phone_number}")
-async def get_token(phone_number: str, x_api_key: Optional[str] = Header(default=None)):
+@app.get("/api/BaranToken/{license_key}")
+async def get_token(license_key: str, x_api_key: Optional[str] = Header(default=None)):
     """
-    دریافت توکن‌های یک شماره از دیتابیس Redis.
+    دریافت توکن‌های یک شماره از دیتابیس Redis با استفاده از لایسنس.
     هدر امنیتی: X-Api-Key
     """
     if API_SECRET_KEY and x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    if not phone_number.startswith("09") or len(phone_number) != 11 or not phone_number.isdigit():
-        raise HTTPException(status_code=400, detail="Invalid phone number format")
+    if not license_key.startswith("BARANLINK"):
+        raise HTTPException(status_code=400, detail="Invalid license key format")
 
     if not redis_client:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     try:
-        raw = redis_client.get(f"snappfood:token:{phone_number}")
+        raw = redis_client.get(f"snappfood:license:{license_key}")
     except Exception as e:
         logger.error(f"خطای ردیس در API: {e}")
         raise HTTPException(status_code=503, detail="Database error")
 
     if not raw:
-        raise HTTPException(status_code=404, detail="Phone number not found")
+        raise HTTPException(status_code=404, detail="License key not found")
 
     data = json.loads(raw)
     return JSONResponse(content={
@@ -271,7 +275,7 @@ def kb_resend_cancel() -> InlineKeyboardMarkup:
 
 def kb_next_or_finish() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕  ثبت شماره جدید",        callback_data='next_line')],
+        [InlineKeyboardButton("➕  ثبت اکانت جدید",        callback_data='next_line')],
         [InlineKeyboardButton("✅  پایان",                  callback_data='finish_session')],
         [InlineKeyboardButton("🚫  لغو عملیات",             callback_data='cancel')]
     ])
@@ -283,7 +287,7 @@ def kb_admin_main() -> InlineKeyboardMarkup:
          InlineKeyboardButton("🔄  بازسازی توکن‌ها",      callback_data='admin_rebuild')],
         [InlineKeyboardButton("📥  استخراج فایل بکاپ",   callback_data='admin_extract')],
         [InlineKeyboardButton("🔑  استخراج توکن‌ها",      callback_data='admin_extract_tokens')],
-        [InlineKeyboardButton("🗑  حذف شماره",            callback_data='admin_delete_hint')]
+        [InlineKeyboardButton("🗑  حذف لایسنس",            callback_data='admin_delete_hint')]
     ])
 
 
@@ -326,9 +330,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     text = (
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🌧  *ربات Baran*\n"
+        "🌧  *ربات تولید لایسنس Baran*\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📱  شماره موبایل را وارد کنید:\n"
+        "📱  ابتدا شماره موبایل مشتری را وارد کنید:\n"
         "_(فرمت صحیح: `09XXXXXXXXX`)_"
     )
     await update.message.reply_text(text, reply_markup=kb_cancel(), parse_mode='Markdown')
@@ -343,9 +347,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "📖  *راهنمای ربات*\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🔹 /start  —  ثبت توکن جدید\n"
+        "🔹 /start  —  تولید لایسنس جدید\n"
         "🔹 /admin  —  پنل مدیریت\n"
-        "🔹 /delete `09XXXXXXXXX`  —  حذف شماره از دیتابیس\n"
+        "🔹 /delete `BARANLINK-XXXX`  —  حذف لایسنس از دیتابیس\n"
         "🔹 /cancel  —  لغو عملیات جاری\n"
         "🔹 /help   —  نمایش این راهنما\n\n"
         "📌 در هر مرحله دکمه *لغو عملیات* را می‌توانید بزنید."
@@ -495,44 +499,37 @@ async def _save_and_reply(
     access_token: str,
     refresh_token: str
 ) -> int:
-    """ذخیره توکن در ردیس و ارسال پیام نهایی."""
+    """ذخیره توکن در ردیس و ارسال پیام نهایی با تولید لایسنس."""
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    license_key = generate_license_key()
 
     if redis_client:
-        # بررسی وجود رکورد قبلی برای حفظ created_at
-        existing_raw = redis_client.get(f"snappfood:token:{phone_number}")
         created_at = now_str
-        if existing_raw:
-            try:
-                created_at = json.loads(existing_raw).get("created_at", now_str)
-            except Exception:
-                pass
-
         redis_data = {
             "phone_number":  phone_number,
             "device_uid":    device_uid,
             "access_token":  access_token,
             "refresh_token": refresh_token,
             "created_at":    created_at,
-            "updated_at":    now_str
+            "updated_at":    now_str,
+            "license_key":   license_key
         }
         try:
             redis_client.set(
-                f"snappfood:token:{phone_number}",
+                f"snappfood:license:{license_key}",
                 json.dumps(redis_data, ensure_ascii=False)
             )
         except Exception as e:
             logger.error(f"خطا در ذخیره ردیس: {e}")
 
-    context.user_data.setdefault('session_phones', []).append(f"`{phone_number}`")
+    context.user_data.setdefault('session_phones', []).append(f"`{license_key}`")
 
     await update.message.reply_text(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✅  *توکن با موفقیت ذخیره شد!*\n"
+        "✅  *لایسنس با موفقیت ساخته شد!*\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📱  شماره: `{phone_number}`\n\n"
-        "✅ توکن با موفقیت ساخته و ذخیره شد! حالا اپلیکیشن Baran را باز کنید "
-        "و شماره خود را وارد کنید تا به صورت کاملاً ایمن و بدون مسدودی لاگین شوید.\n\n"
+        f"🔑  لایسنس مشتری: `{license_key}`\n\n"
+        "✅ این لایسنس اختصاصی ساخته و در سیستم ثبت شد. می‌توانید آن را تحویل مشتری دهید.\n\n"
         "🔽  مرحله بعد را انتخاب کنید:",
         reply_markup=kb_next_or_finish(),
         parse_mode='Markdown'
@@ -545,9 +542,9 @@ async def next_line_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     count = len(context.user_data.get('session_phones', []))
     await query.edit_message_text(
-        f"✅  شماره {count} ذخیره شد.\n\n"
+        f"✅  لایسنس {count} ذخیره شد.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📱  شماره موبایل بعدی را وارد کنید:\n"
+        f"📱  شماره موبایل مشتری بعدی را وارد کنید:\n"
         f"_(فرمت صحیح: `09XXXXXXXXX`)_",
         reply_markup=kb_cancel(),
         parse_mode='Markdown'
@@ -568,17 +565,17 @@ async def finish_session_callback(update: Update, context: ContextTypes.DEFAULT_
         phones_text = "\n".join(phones)
         msg = (
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📦  *شماره‌های این جلسه*\n"
-            f"🔢  تعداد: {count} شماره\n"
+            f"📦  *لایسنس‌های صادر شده در این جلسه*\n"
+            f"🔢  تعداد: {count} لایسنس\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
             f"{phones_text}\n\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅  برای جلسه جدید: /start"
+            f"✅  برای تولید لایسنس جدید: /start"
         )
         await query.message.reply_text(msg, parse_mode='Markdown')
     else:
         await query.message.reply_text(
-            "ℹ️  هیچ شماره‌ای در این جلسه ثبت نشد.\n\nبرای شروع: /start"
+            "ℹ️  هیچ لایسنسی در این جلسه تولید نشد.\n\nبرای شروع: /start"
         )
     return ConversationHandler.END
 
@@ -589,7 +586,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     db_status    = "🟢 متصل" if redis_client else "🔴 قطع"
-    record_count = len(redis_client.keys("snappfood:token:*")) if redis_client else 0
+    record_count = len(redis_client.keys("snappfood:license:*")) if redis_client else 0
 
     text = (
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -607,21 +604,21 @@ async def delete_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if not context.args:
         await update.message.reply_text(
-            "⚠️  *نحوه استفاده:*\n`/delete 09123456789`",
+            "⚠️  *نحوه استفاده:*\n`/delete BARANLINK-XXXX-XXXX`",
             parse_mode='Markdown'
         )
         return
-    phone = context.args[0].strip()
-    if not (phone.startswith("09") and len(phone) == 11 and phone.isdigit()):
-        await update.message.reply_text("⚠️  فرمت شماره نامعتبر است.", parse_mode='Markdown')
+    license_key = context.args[0].strip()
+    if not license_key.startswith("BARANLINK"):
+        await update.message.reply_text("⚠️  فرمت لایسنس نامعتبر است.", parse_mode='Markdown')
         return
-    if redis_client and redis_client.delete(f"snappfood:token:{phone}"):
+    if redis_client and redis_client.delete(f"snappfood:license:{license_key}"):
         await update.message.reply_text(
-            f"✅  شماره `{phone}` با موفقیت از دیتابیس حذف شد.", parse_mode='Markdown'
+            f"✅  لایسنس `{license_key}` با موفقیت از دیتابیس حذف شد.", parse_mode='Markdown'
         )
     else:
         await update.message.reply_text(
-            f"⚠️  شماره `{phone}` در دیتابیس یافت نشد.", parse_mode='Markdown'
+            f"⚠️  لایسنس `{license_key}` در دیتابیس یافت نشد.", parse_mode='Markdown'
         )
 
 
@@ -631,7 +628,7 @@ async def process_database_rebuild(chat_id: int, bot):
         await bot.send_message(chat_id=chat_id, text="❌  دیتابیس ردیس متصل نیست!")
         return
 
-    keys = redis_client.keys("snappfood:token:*")
+    keys = redis_client.keys("snappfood:license:*")
     total = len(keys)
     if total == 0:
         await bot.send_message(chat_id=chat_id, text="ℹ️  هیچ رکوردی در دیتابیس یافت نشد.")
@@ -709,33 +706,34 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == 'admin_stats':
         await query.answer()
-        keys  = redis_client.keys("snappfood:token:*")
+        keys  = redis_client.keys("snappfood:license:*")
         count = len(keys)
         await query.edit_message_text(
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📊  *آمار دیتابیس*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"🗄  تعداد کل اکانت‌های ذخیره‌شده: `{count}`\n\n"
-            f"🗑  برای حذف:\n`/delete 09XXXXXXXXX`",
+            f"🗄  تعداد کل لایسنس‌های ذخیره‌شده: `{count}`\n\n"
+            f"🗑  برای حذف یک لایسنس:\n`/delete BARANLINK-XXXX-XXXX`",
             parse_mode='Markdown',
             reply_markup=kb_back_to_admin()
         )
 
     elif query.data == 'admin_extract':
-        keys = redis_client.keys("snappfood:token:*")
+        keys = redis_client.keys("snappfood:license:*")
         if not keys:
             await query.answer("⚠️ دیتابیس خالی است!", show_alert=True)
             return
         await query.answer("درحال آماده‌سازی فایل بکاپ...")
         lines = [
-            "فایل بکاپ دیتابیس",
+            "فایل بکاپ دیتابیس (لایسنس‌ها)",
             f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "-" * 40, ""
         ]
         for k in keys:
             try:
                 data = json.loads(redis_client.get(k))
-                lines.append(f"شماره:           {data.get('phone_number', 'نامشخص')}")
+                lines.append(f"لایسنس:          {data.get('license_key', k.split(':')[-1])}")
+                lines.append(f"شماره موبایل:    {data.get('phone_number', 'نامشخص')}")
                 lines.append(f"آخرین بروزرسانی: {data.get('updated_at', 'نامشخص')}")
                 lines.append("-" * 40)
             except Exception:
@@ -755,20 +753,21 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == 'admin_extract_tokens':
-        keys = redis_client.keys("snappfood:token:*")
+        keys = redis_client.keys("snappfood:license:*")
         if not keys:
             await query.answer("⚠️ دیتابیس خالی است!", show_alert=True)
             return
         await query.answer("درحال آماده‌سازی فایل توکن‌ها...")
         lines = [
-            "لیست توکن‌ها و رفرش توکن‌ها",
+            "لیست کامل توکن‌ها به همراه لایسنس‌ها",
             f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "=" * 60, ""
         ]
         for k in keys:
             try:
                 data = json.loads(redis_client.get(k))
-                lines.append(f"شماره:         {data.get('phone_number', 'نامشخص')}")
+                lines.append(f"لایسنس:        {data.get('license_key', k.split(':')[-1])}")
+                lines.append(f"شماره موبایل:  {data.get('phone_number', 'نامشخص')}")
                 lines.append(f"Access Token:  {data.get('access_token', 'ندارد')}")
                 lines.append(f"Refresh Token: {data.get('refresh_token', 'ندارد')}")
                 lines.append(f"آخرین بروزرسانی: {data.get('updated_at', 'نامشخص')}")
@@ -782,7 +781,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_document(
             doc,
             caption=(
-                f"🔑  *فایل توکن‌ها*\n"
+                f"🔑  *فایل جامع توکن‌ها و لایسنس‌ها*\n"
                 f"📊  تعداد رکوردها: `{len(keys)}`\n"
                 f"🕐  زمان: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
                 f"⚠️  این فایل حساس است. مراقب باشید."
@@ -801,15 +800,15 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == 'admin_delete_hint':
         await query.answer()
         await query.message.reply_text(
-            "🗑  *حذف شماره از دیتابیس:*\n\n"
-            "دستور زیر را ارسال کنید:\n`/delete 09XXXXXXXXX`",
+            "🗑  *حذف لایسنس از دیتابیس:*\n\n"
+            "دستور زیر را ارسال کنید:\n`/delete BARANLINK-XXXX-XXXX`",
             parse_mode='Markdown'
         )
 
     elif query.data == 'admin_back':
         await query.answer()
         db_status    = "🟢 متصل" if redis_client else "🔴 قطع"
-        record_count = len(redis_client.keys("snappfood:token:*")) if redis_client else 0
+        record_count = len(redis_client.keys("snappfood:license:*")) if redis_client else 0
         text = (
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⚙️  *پنل مدیریت*\n"
