@@ -48,7 +48,7 @@ ALLOWED_USER_IDS = [int(x.strip()) for x in allowed_users_env.split(",") if x.st
 REDIS_URL = os.getenv("REDIS_URL")
 PORT      = int(os.getenv("PORT", 8000))
 
-# کلید امنیتی API — در Railway به عنوان Secret تنظیم کنید
+# کلید امنیتی API
 API_SECRET_KEY = os.getenv("API_SECRET_KEY", "")
 
 IRAN_PROXY = os.getenv("IRAN_PROXY", "")
@@ -68,19 +68,10 @@ SNAPP_MARKET_SSO_CHANNEL = os.getenv("SNAPP_MARKET_SSO_CHANNEL", "food")
 SNAPP_MARKET_VERIFY_TLS = os.getenv("SNAPP_MARKET_VERIFY_TLS", "true").lower() not in {
     "0", "false", "no"
 }
-DISCOUNT_CHECK_MIN_DELAY = max(
-    1.0, float(os.getenv("DISCOUNT_CHECK_MIN_DELAY", "2.5"))
-)
-DISCOUNT_CHECK_MAX_DELAY = max(
-    DISCOUNT_CHECK_MIN_DELAY,
-    float(os.getenv("DISCOUNT_CHECK_MAX_DELAY", "5.0"))
-)
-DISCOUNT_CHECK_COOLDOWN = max(
-    30.0, float(os.getenv("DISCOUNT_CHECK_COOLDOWN", "900"))
-)
-DISCOUNT_CHECK_MAX_PAGES = max(
-    1, min(20, int(os.getenv("DISCOUNT_CHECK_MAX_PAGES", "5")))
-)
+DISCOUNT_CHECK_MIN_DELAY = max(1.0, float(os.getenv("DISCOUNT_CHECK_MIN_DELAY", "2.5")))
+DISCOUNT_CHECK_MAX_DELAY = max(DISCOUNT_CHECK_MIN_DELAY, float(os.getenv("DISCOUNT_CHECK_MAX_DELAY", "5.0")))
+DISCOUNT_CHECK_COOLDOWN = max(30.0, float(os.getenv("DISCOUNT_CHECK_COOLDOWN", "900")))
+DISCOUNT_CHECK_MAX_PAGES = max(1, min(20, int(os.getenv("DISCOUNT_CHECK_MAX_PAGES", "5"))))
 
 # --- اتصال به ردیس ---
 try:
@@ -110,13 +101,8 @@ last_discount_check_at = 0.0
 
 app = FastAPI(title="Baran Token API", docs_url=None, redoc_url=None)
 
-
 @app.get("/api/BaranToken/{license_key}")
 async def get_token(license_key: str, x_api_key: Optional[str] = Header(default=None)):
-    """
-    دریافت توکن‌های یک شماره از دیتابیس Redis با استفاده از لایسنس.
-    هدر امنیتی: X-Api-Key
-    """
     if API_SECRET_KEY and x_api_key != API_SECRET_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
@@ -144,7 +130,6 @@ async def get_token(license_key: str, x_api_key: Optional[str] = Header(default=
         "updated_at": data.get("updated_at")
     })
 
-
 @app.get("/health")
 async def health_check():
     db_ok = False
@@ -158,17 +143,10 @@ async def health_check():
 
 # =================================================================
 
-
-# ======================== سیستم رفرش توکن کوتاه ========================
-
 def refresh_short_token(short_refresh_token: str) -> dict:
-    """بازسازی توکن با اندپوینت کوتاه یکبار مصرف."""
     device_uid = str(uuid.uuid4())
-
     headers = BASE_HEADERS.copy()
-    headers.update({
-        'authority': 'user.snappfood.ir',
-    })
+    headers.update({'authority': 'user.snappfood.ir'})
 
     payload = {
         "refreshToken": short_refresh_token,
@@ -182,47 +160,39 @@ def refresh_short_token(short_refresh_token: str) -> dict:
         }
     }
 
-    try:
-        res = requests.post(
-            "https://user.snappfood.ir/v1/auth/token",
-            json=payload,
-            headers=headers,
-            proxies=SNAPPFOOD_PROXIES,
-            verify=False,
-            timeout=20
-        )
-
-        if res.status_code == 200:
-            data = res.json().get("data", {}) or {}
-            new_access  = data.get("accessToken")
-            new_refresh = data.get("refreshToken") or short_refresh_token
-            if new_access:
-                return {
-                    'status': True,
-                    'data': {'accessToken': new_access, 'refreshToken': new_refresh}
-                }
-            return {'status': False, 'error': 'توکن جدید در پاسخ سرور یافت نشد.'}
-
-        # تلاش برای استخراج متن خطای دقیق سرور اسنپ‌فود
-        err_msg = "خطای ناشناخته"
+    for attempt in range(3):
         try:
-            resp_json = res.json()
-            err_msg = resp_json.get("error") or resp_json.get("message") or res.text[:100]
-        except Exception:
-            err_msg = res.text[:100]
+            res = requests.post(
+                "https://user.snappfood.ir/v1/auth/token",
+                json=payload, headers=headers, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=20
+            )
+            try:
+                data = res.json()
+            except ValueError:
+                if attempt < 2:
+                    time.sleep(1.5)
+                    continue
+                return {'status': False, 'error': f"پاسخ نامعتبر سرور (کد {res.status_code})"}
 
-        logger.error(f"رفرش توکن — HTTP {res.status_code}: {err_msg}")
-        return {'status': False, 'error': f"HTTP {res.status_code}: {err_msg}"}
+            if res.status_code == 200:
+                resp_data = data.get("data", {}) or {}
+                new_access  = resp_data.get("accessToken")
+                new_refresh = resp_data.get("refreshToken") or short_refresh_token
+                if new_access:
+                    return {'status': True, 'data': {'accessToken': new_access, 'refreshToken': new_refresh}}
+                return {'status': False, 'error': 'توکن جدید در پاسخ سرور یافت نشد.'}
 
-    except Exception as e:
-        logger.error(f"خطای رفرش توکن (Network): {e}")
-        return {'status': False, 'error': str(e)}
+            err_msg = data.get("error") or data.get("message") or "خطای ناشناخته"
+            return {'status': False, 'error': f"HTTP {res.status_code}: {err_msg}"}
 
-# =================================================================
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1.5)
+                continue
+            return {'status': False, 'error': str(e)}
 
 
 def _market_common_params(device_uid: str) -> dict:
-    """پارامترهای مشترک درخواست‌های اسنپ‌مارکت."""
     return {
         "client": SNAPP_MARKET_CLIENT,
         "deviceType": SNAPP_MARKET_DEVICE_TYPE,
@@ -233,60 +203,39 @@ def _market_common_params(device_uid: str) -> dict:
     }
 
 
-def exchange_food_token_for_market_token(
-    access_token: str, device_uid: str
-) -> dict:
-    """تبدیل access token اسنپ‌فود به نشست معتبر اسنپ‌مارکت."""
+def exchange_food_token_for_market_token(access_token: str, device_uid: str) -> dict:
     params = {
         "token": access_token,
         "sso_channel": SNAPP_MARKET_SSO_CHANNEL,
         **_market_common_params(device_uid),
     }
-    # هدر User-Agent برای عبور از فایروال ArvanCloud الزامی است
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "fa-IR, fa;q=0.9,en;q=0.8",
         "User-Agent": BASE_HEADERS["user-agent"],
     }
-
     try:
         response = requests.get(
             f"{SNAPP_MARKET_BASE_URL}/mobile/v2/user/snapp-sso",
-            params=params,
-            headers=headers,
-            proxies=SNAPPFOOD_PROXIES,
-            verify=SNAPP_MARKET_VERIFY_TLS,
-            timeout=20,
+            params=params, headers=headers, proxies=SNAPPFOOD_PROXIES, verify=SNAPP_MARKET_VERIFY_TLS, timeout=20
         )
         if response.status_code != 200:
-            return {
-                "status": False,
-                "retryable": response.status_code in {401, 403},
-                "error_code": f"sso_http_{response.status_code}",
-            }
+            return {"status": False, "retryable": response.status_code in {401, 403, 502}, "error_code": f"sso_http_{response.status_code}"}
+        
+        try:
+            payload = response.json() or {}
+        except ValueError:
+            return {"status": False, "retryable": True, "error_code": "sso_invalid_json"}
 
-        payload = response.json() or {}
-        market_token = (
-            payload.get("data", {})
-            .get("oauth2_token", {})
-            .get("access_token")
-        )
+        market_token = payload.get("data", {}).get("oauth2_token", {}).get("access_token")
         if not market_token:
-            return {
-                "status": False,
-                "retryable": False,
-                "error_code": "sso_token_missing",
-            }
+            return {"status": False, "retryable": False, "error_code": "sso_token_missing"}
         return {"status": True, "access_token": market_token}
     except requests.RequestException:
         return {"status": False, "retryable": True, "error_code": "sso_network_error"}
-    except (ValueError, TypeError, AttributeError):
-        return {"status": False, "retryable": False, "error_code": "sso_invalid_response"}
 
 
 def fetch_market_vouchers(market_access_token: str, device_uid: str) -> dict:
-    """دریافت ووچرهای اختصاصی حساب از صفحه All ووچرهای اسنپ‌مارکت."""
-    # هدر User-Agent برای عبور از فایروال ArvanCloud الزامی است
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "fa-IR, fa;q=0.9,en;q=0.8",
@@ -294,65 +243,37 @@ def fetch_market_vouchers(market_access_token: str, device_uid: str) -> dict:
         "User-Agent": BASE_HEADERS["user-agent"],
     }
     vouchers = []
-
     try:
         for page in range(1, DISCOUNT_CHECK_MAX_PAGES + 1):
-            params = {
-                "filterType": "all",
-                "page": page,
-                "pageSize": 10,
-            }
+            params = {"filterType": "all", "page": page, "pageSize": 10}
             response = requests.get(
                 f"{SNAPP_MARKET_BASE_URL}/belladonna/api/v1/vouchers",
-                params=params,
-                headers=headers,
-                proxies=SNAPPFOOD_PROXIES,
-                verify=SNAPP_MARKET_VERIFY_TLS,
-                timeout=20,
+                params=params, headers=headers, proxies=SNAPPFOOD_PROXIES, verify=SNAPP_MARKET_VERIFY_TLS, timeout=20
             )
 
             if response.status_code != 200:
-                return {
-                    "status": False,
-                    "retryable": response.status_code in {401, 403},
-                    "error_code": f"voucher_http_{response.status_code}",
-                }
+                return {"status": False, "retryable": response.status_code in {401, 403, 502}, "error_code": f"voucher_http_{response.status_code}"}
 
-            payload = response.json() or {}
+            try:
+                payload = response.json() or {}
+            except ValueError:
+                return {"status": False, "retryable": True, "error_code": "voucher_invalid_json"}
+
             if isinstance(payload, dict):
                 page_items = payload.get("vouchers") or []
                 if isinstance(page_items, list):
-                    vouchers.extend(
-                        item for item in page_items if isinstance(item, dict)
-                    )
+                    vouchers.extend(item for item in page_items if isinstance(item, dict))
                 if not payload.get("hasMore"):
                     break
             else:
-                return {
-                    "status": False,
-                    "retryable": False,
-                    "error_code": "voucher_invalid_response",
-                }
+                return {"status": False, "retryable": False, "error_code": "voucher_invalid_response"}
 
         return {"status": True, "vouchers": vouchers}
     except requests.RequestException:
-        return {
-            "status": False,
-            "retryable": True,
-            "error_code": "voucher_network_error",
-        }
-    except (ValueError, TypeError, AttributeError):
-        return {
-            "status": False,
-            "retryable": False,
-            "error_code": "voucher_invalid_response",
-        }
+        return {"status": False, "retryable": True, "error_code": "voucher_network_error"}
 
 
 def check_account_discounts(record: dict) -> dict:
-    """
-    احراز هویت یک حساب و خواندن تخفیف‌های آن.
-    """
     access_token = record.get("access_token")
     refresh_token = record.get("refresh_token")
     device_uid = record.get("device_uid") or str(uuid.uuid4())
@@ -363,29 +284,15 @@ def check_account_discounts(record: dict) -> dict:
     for attempt in range(2):
         sso_result = exchange_food_token_for_market_token(access_token, device_uid)
         if sso_result.get("status"):
-            voucher_result = fetch_market_vouchers(
-                sso_result["access_token"], device_uid
-            )
+            voucher_result = fetch_market_vouchers(sso_result["access_token"], device_uid)
             if voucher_result.get("status"):
-                return {
-                    "status": True,
-                    "vouchers": voucher_result.get("vouchers", []),
-                    "device_uid": device_uid,
-                    "refreshed": attempt == 1,
-                }
+                return {"status": True, "vouchers": voucher_result.get("vouchers", []), "device_uid": device_uid, "refreshed": attempt == 1}
             should_refresh = voucher_result.get("retryable", False)
         else:
             should_refresh = sso_result.get("retryable", False)
 
         if not should_refresh or attempt != 0 or not refresh_token:
-            return {
-                "status": False,
-                "error_code": (
-                    voucher_result.get("error_code")
-                    if sso_result.get("status")
-                    else sso_result.get("error_code")
-                ),
-            }
+            return {"status": False, "error_code": (voucher_result.get("error_code") if sso_result.get("status") else sso_result.get("error_code"))}
 
         refresh_result = refresh_short_token(refresh_token)
         refresh_data = refresh_result.get("data") or {}
@@ -406,21 +313,18 @@ def check_account_discounts(record: dict) -> dict:
 
 
 def _text_value(value, default="نامشخص") -> str:
-    """مقدار مناسب برای فایل متنی؛ بدون شکستن قالب گزارش."""
     if value is None or value == "":
         return default
     return str(value).replace("\r", " ").replace("\n", " ").strip()
 
 
 def build_discount_report(results: list[dict]) -> str:
-    """ساخت گزارش متنی بدون access token و refresh token."""
     lines = [
         "گزارش چکر تخفیف اسنپ‌مارکت",
         f"تاریخ بررسی: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "=" * 72,
         "",
     ]
-
     total_discounts = 0
     for index, result in enumerate(results, start=1):
         phone = _text_value(result.get("phone_number"))
@@ -428,11 +332,7 @@ def build_discount_report(results: list[dict]) -> str:
         vouchers = result.get("vouchers") or []
         total_discounts += len(vouchers)
 
-        lines.extend([
-            f"اکانت {index}",
-            f"لایسنس: {license_key}",
-            f"شماره موبایل: {phone}",
-        ])
+        lines.extend([f"اکانت {index}", f"لایسنس: {license_key}", f"شماره موبایل: {phone}"])
 
         if result.get("status") != "ok":
             lines.append(f"وضعیت: خطا در بررسی ({_text_value(result.get('error_code'))})")
@@ -447,11 +347,6 @@ def build_discount_report(results: list[dict]) -> str:
                     f"  عنوان: {_text_value(voucher.get('title'))}",
                     f"  توضیحات: {_text_value(voucher.get('description'))}",
                     f"  انقضا: {_text_value(voucher.get('expiryDateFormatted') or voucher.get('expiryDate'))}",
-                    f"  وضعیت: {_text_value(voucher.get('statusText') or voucher.get('status'))}",
-                    f"  نوع پاداش: {_text_value(voucher.get('rewardType'))}",
-                    f"  حالت پاداش: {_text_value(voucher.get('rewardMode'))}",
-                    f"  سقف استفاده برای هر کاربر: {_text_value(voucher.get('quantityPerUser'))}",
-                    f"  استفاده باقی‌مانده: {_text_value(voucher.get('remainingUses'))}",
                 ])
         lines.extend(["-" * 72, ""])
 
@@ -459,26 +354,18 @@ def build_discount_report(results: list[dict]) -> str:
         f"تعداد اکانت‌های بررسی‌شده: {len(results)}",
         f"تعداد کل تخفیف‌های پیدا‌شده: {total_discounts}",
         "",
-        "نکته امنیتی: توکن‌های احراز هویت عمداً در این گزارش درج نشده‌اند.",
+        "نکته امنیتی: توکن‌های احراز هویت در این گزارش درج نشده‌اند.",
     ])
     return "\n".join(lines)
 
 
 async def process_discount_check(chat_id: int, bot) -> None:
-    """بررسی متعادل همه لایسنس‌ها و ارسال گزارش متنی به ادمین."""
     global last_discount_check_at
-
     async with discount_check_lock:
         now = time.monotonic()
         remaining = DISCOUNT_CHECK_COOLDOWN - (now - last_discount_check_at)
         if last_discount_check_at and remaining > 0:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    "⏱️ چکر اخیراً اجرا شده است.\n"
-                    f"لطفاً {int(remaining) + 1} ثانیه دیگر دوباره تلاش کنید."
-                ),
-            )
+            await bot.send_message(chat_id=chat_id, text=f"⏱️ چکر اخیراً اجرا شده است.\nلطفاً {int(remaining) + 1} ثانیه دیگر دوباره تلاش کنید.")
             return
 
         if not redis_client:
@@ -487,19 +374,13 @@ async def process_discount_check(chat_id: int, bot) -> None:
 
         keys = redis_client.keys("snappfood:license:*")
         if not keys:
-            await bot.send_message(
-                chat_id=chat_id, text="ℹ️ هیچ لایسنسی برای بررسی در دیتابیس نیست."
-            )
+            await bot.send_message(chat_id=chat_id, text="ℹ️ هیچ لایسنسی برای بررسی در دیتابیس نیست.")
             return
 
         last_discount_check_at = now
         await bot.send_message(
             chat_id=chat_id,
-            text=(
-                "🔎 *چکر تخفیف شروع شد*\n\n"
-                f"تعداد اکانت‌ها: `{len(keys)}`\n"
-                "درخواست‌ها به‌صورت متعادل ارسال می‌شوند؛ نتیجه در فایل متنی ارسال خواهد شد."
-            ),
+            text=f"🔎 *چکر تخفیف شروع شد*\n\nتعداد اکانت‌ها: `{len(keys)}`\nدرخواست‌ها به‌صورت متعادل ارسال می‌شوند؛ نتیجه در فایل متنی ارسال خواهد شد.",
             parse_mode="Markdown",
         )
 
@@ -523,72 +404,51 @@ async def process_discount_check(chat_id: int, bot) -> None:
                     "phone_number": record.get("phone_number"),
                     "license_key": record.get("license_key") or key.split(":")[-1],
                 })
-            except (ValueError, TypeError, json.JSONDecodeError):
-                results.append({
-                    "status": "error",
-                    "error_code": "invalid_database_record",
-                    "vouchers": [],
-                    "phone_number": "نامشخص",
-                    "license_key": key.split(":")[-1],
-                })
             except Exception:
-                logger.exception("خطا در بررسی رکورد تخفیف")
-                results.append({
-                    "status": "error",
-                    "error_code": "unexpected_check_error",
-                    "vouchers": [],
-                    "phone_number": "نامشخص",
-                    "license_key": key.split(":")[-1],
-                })
+                results.append({"status": "error", "error_code": "unexpected_check_error", "vouchers": [], "phone_number": "نامشخص", "license_key": key.split(":")[-1]})
 
             if key != keys[-1]:
-                await asyncio.sleep(
-                    random.uniform(DISCOUNT_CHECK_MIN_DELAY, DISCOUNT_CHECK_MAX_DELAY)
-                )
+                await asyncio.sleep(random.uniform(DISCOUNT_CHECK_MIN_DELAY, DISCOUNT_CHECK_MAX_DELAY))
 
         content = build_discount_report(results)
         doc = io.BytesIO(content.encode("utf-8"))
         doc.name = f"Discount_Check_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
         await bot.send_document(
-            chat_id=chat_id,
-            document=doc,
-            caption=(
-                "✅ *بررسی تخفیف‌ها پایان یافت*\n"
-                f"اکانت‌های بررسی‌شده: `{len(results)}`\n"
-                f"تعداد تخفیف‌ها: `{sum(len(item.get('vouchers', [])) for item in results)}`"
-            ),
+            chat_id=chat_id, document=doc,
+            caption=f"✅ *بررسی تخفیف‌ها پایان یافت*\nاکانت‌های بررسی‌شده: `{len(results)}`\nتعداد تخفیف‌ها: `{sum(len(item.get('vouchers', [])) for item in results)}`",
             parse_mode="Markdown",
         )
         await bot.send_message(
-            chat_id=chat_id,
-            text=(
-                "⚙️ *پنل مدیریت*\n\n"
-                "پنل برای دسترسی سریع دوباره در دسترس است:"
-            ),
-            reply_markup=kb_admin_main(),
-            parse_mode="Markdown",
+            chat_id=chat_id, text="⚙️ *پنل مدیریت*\n\nپنل برای دسترسی سریع دوباره در دسترس است:",
+            reply_markup=kb_admin_main(), parse_mode="Markdown",
         )
 
 # =================================================================
 
-
-# --- توابع API اسنپ‌فود ---
+# --- توابع API اسنپ‌فود با سیستم تلاش مجدد خودکار (Auto-Retry) ---
 
 def send_verification_code(phone_number: str) -> dict:
     url = "https://user.snappfood.ir/v1/auth/otp/send"
     payload = {"mobile_number": phone_number, "type": "Customer"}
-    try:
-        response = requests.post(url, json=payload, headers=BASE_HEADERS,
-                                 proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
-        if response.status_code == 200:
-            return response.json()
-        return {'status': False, 'error': f"HTTP {response.status_code}"}
-    except Exception as e:
-        return {'status': False, 'error': str(e)}
+    
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, headers=BASE_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            try:
+                return response.json()
+            except ValueError:
+                if attempt < 2:
+                    time.sleep(1.5)
+                    continue
+                return {'status': False, 'error': f"فایروال اسنپ‌فود مسدود کرد (کد {response.status_code})"}
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1.5)
+                continue
+            return {'status': False, 'error': "خطای شبکه"}
 
 
 def verify_code_otp(phone_number: str, code: str, device_uid: str) -> dict:
-    """تأیید کد OTP — با بازگرداندن وضعیت HTTP برای تشخیص دقیق ثبت نام."""
     url = "https://user.snappfood.ir/v1/auth/token"
     payload = {
         "cellphone": phone_number,
@@ -602,19 +462,27 @@ def verify_code_otp(phone_number: str, code: str, device_uid: str) -> dict:
             "scopes": ["mobile_v2", "mobile_v1", "webview"]
         }
     }
-    try:
-        response = requests.post(url, json=payload, headers=BASE_HEADERS,
-                                 proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
-        data = response.json()
-        data['http_status'] = response.status_code
-        return data
-    except Exception as e:
-        return {'http_status': 500, 'error': str(e)}
+    
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, headers=BASE_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            try:
+                data = response.json()
+                data['http_status'] = response.status_code
+                return data
+            except ValueError:
+                if attempt < 2:
+                    time.sleep(1.5)
+                    continue
+                return {'http_status': response.status_code, 'error': f"فایروال اسنپ‌فود مسدود کرد"}
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1.5)
+                continue
+            return {'http_status': 500, 'error': "خطای شبکه"}
 
 
-def register_new_user(phone_number: str, code: str, device_uid: str,
-                      first_name: str, last_name: str) -> dict:
-    """ثبت‌نام کاربر جدید."""
+def register_new_user(phone_number: str, code: str, device_uid: str, first_name: str, last_name: str) -> dict:
     url = "https://user.snappfood.ir/v1/auth/token"
     payload = {
         "cellphone": phone_number,
@@ -630,12 +498,22 @@ def register_new_user(phone_number: str, code: str, device_uid: str,
             "scopes": ["mobile_v2", "mobile_v1", "webview"]
         }
     }
-    try:
-        response = requests.post(url, json=payload, headers=BASE_HEADERS,
-                                 proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
-        return response.json()
-    except Exception as e:
-        return {'status': False, 'error': str(e)}
+    
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, headers=BASE_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            try:
+                return response.json()
+            except ValueError:
+                if attempt < 2:
+                    time.sleep(1.5)
+                    continue
+                return {'status': False, 'error': f"فایروال اسنپ‌فود مسدود کرد"}
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(1.5)
+                continue
+            return {'status': False, 'error': "خطای شبکه"}
 
 
 # ======================== کیبوردهای آماده ========================
@@ -646,14 +524,12 @@ def kb_cancel() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🚫  لغو عملیات", callback_data='cancel')]
     ])
 
-
 def kb_resend_cancel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔄  ارسال مجدد کد", callback_data='resend_code')],
         [InlineKeyboardButton("⚙️  پنل مدیریت",      callback_data='admin_open')],
         [InlineKeyboardButton("🚫  لغو عملیات",    callback_data='cancel')]
     ])
-
 
 def kb_next_or_finish() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -662,7 +538,6 @@ def kb_next_or_finish() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("⚙️  پنل مدیریت",             callback_data='admin_open')],
         [InlineKeyboardButton("🚫  لغو عملیات",             callback_data='cancel')]
     ])
-
 
 def kb_admin_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -674,7 +549,6 @@ def kb_admin_main() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🗑  حذف لایسنس",            callback_data='admin_delete_hint')]
     ])
 
-
 def kb_back_to_admin() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔙  بازگشت به پنل",        callback_data='admin_back')]
@@ -682,8 +556,6 @@ def kb_back_to_admin() -> InlineKeyboardMarkup:
 
 # =================================================================
 
-
-# --- تابع لغو ---
 async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     if update.callback_query:
@@ -698,11 +570,8 @@ async def cancel_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         )
     return ConversationHandler.END
 
-
 async def exit_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """خروج امن از مکالمه جاری و نمایش پنل مدیریت."""
     context.user_data.clear()
-
     if update.callback_query:
         query = update.callback_query
         await query.answer("به پنل مدیریت منتقل شدید.")
@@ -720,13 +589,10 @@ async def exit_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             reply_markup=kb_admin_main(),
             parse_mode="Markdown",
         )
-
     return ConversationHandler.END
 
 
-# --- وضعیت‌های مکالمه ---
 ASK_PHONE, ASK_CODE, ASK_NEXT_ACTION = range(3)
-
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
@@ -747,7 +613,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text(text, reply_markup=kb_cancel(), parse_mode='Markdown')
     return ASK_PHONE
 
-
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ALLOWED_USER_IDS:
         await update.message.reply_text("⛔️ شما دسترسی به این ربات ندارید.")
@@ -765,7 +630,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode='Markdown')
 
-
 async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     phone_number = update.message.text.strip()
     if not (phone_number.startswith("09") and len(phone_number) == 11 and phone_number.isdigit()):
@@ -778,10 +642,7 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ASK_PHONE
 
     context.user_data['phone_number'] = phone_number
-    wait_msg = await update.message.reply_text(
-        f"⏳  درحال ارسال کد تأیید به `{phone_number}` ...",
-        parse_mode='Markdown'
-    )
+    wait_msg = await update.message.reply_text(f"⏳  درحال ارسال کد تأیید به `{phone_number}` ...", parse_mode='Markdown')
 
     res = await asyncio.to_thread(send_verification_code, phone_number)
 
@@ -806,7 +667,6 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             parse_mode='Markdown'
         )
         return ConversationHandler.END
-
 
 async def resend_code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -834,16 +694,12 @@ async def resend_code_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         )
     return ASK_CODE
 
-
 async def ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     code = update.message.text.strip()
     phone_number = context.user_data.get('phone_number')
 
     if not code.isdigit():
-        await update.message.reply_text(
-            "⚠️  لطفاً فقط اعداد کد تأیید را وارد کنید.",
-            reply_markup=kb_resend_cancel()
-        )
+        await update.message.reply_text("⚠️  لطفاً فقط اعداد کد تأیید را وارد کنید.", reply_markup=kb_resend_cancel())
         return ASK_CODE
 
     wait_msg = await update.message.reply_text("⏳  درحال اعتبارسنجی کد...")
@@ -861,20 +717,16 @@ async def ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     if http_status == 200:
         if access_token:
-            # ✅ ورود موفق
             await wait_msg.delete()
             return await _save_and_reply(update, context, phone_number, device_uid, access_token, refresh_token)
         else:
-            # 🆕 کاربر جدید: ساخت اسم رندوم و ثبت‌نام خودکار
             await wait_msg.edit_text("⏳ کاربر جدید تشخیص داده شد. درحال ساخت اکانت...")
-            
             first_names = ["علی", "محمد", "یوسف", "امیر", "حسین", "رضا", "مهدی", "سارا", "زهرا", "مریم", "علیرضا"]
             last_names = ["راد", "تهرانی", "حسینی", "پارسا", "دانش", "آریا", "محمدی", "کریمی", "احمدی"]
             f_name = random.choice(first_names)
             l_name = random.choice(last_names)
             
             reg_res = await asyncio.to_thread(register_new_user, phone_number, code, device_uid, f_name, l_name)
-            
             reg_data = reg_res.get('data') or {}
             new_access = reg_data.get('accessToken')
             new_refresh = reg_data.get('refreshToken')
@@ -887,18 +739,14 @@ async def ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 await wait_msg.edit_text(f"❌ *خطا در ساخت اکانت*\nجزئیات: `{err}`", parse_mode='Markdown')
                 return ConversationHandler.END
     else:
-        # ❌ کد اشتباه یا منقضی
         err_msg = res.get('error') or res.get('message') or 'کد نامعتبر یا منقضی شده است.'
         await wait_msg.delete()
         await update.message.reply_text(
-            f"⚠️  *خطا در اعتبارسنجی*\n\n"
-            f"جزئیات: `{err_msg}`\n\n"
-            f"کد جدید دریافت کنید یا عملیات را لغو کنید:",
+            f"⚠️  *خطا در اعتبارسنجی*\n\nجزئیات: `{err_msg}`\n\nکد جدید دریافت کنید یا عملیات را لغو کنید:",
             reply_markup=kb_resend_cancel(),
             parse_mode='Markdown'
         )
         return ASK_CODE
-
 
 async def _save_and_reply(
     update: Update,
@@ -908,26 +756,21 @@ async def _save_and_reply(
     access_token: str,
     refresh_token: str
 ) -> int:
-    """ذخیره توکن در ردیس و ارسال پیام نهایی با تولید لایسنس."""
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     license_key = generate_license_key()
 
     if redis_client:
-        created_at = now_str
         redis_data = {
             "phone_number":  phone_number,
             "device_uid":    device_uid,
             "access_token":  access_token,
             "refresh_token": refresh_token,
-            "created_at":    created_at,
+            "created_at":    now_str,
             "updated_at":    now_str,
             "license_key":   license_key
         }
         try:
-            redis_client.set(
-                f"snappfood:license:{license_key}",
-                json.dumps(redis_data, ensure_ascii=False)
-            )
+            redis_client.set(f"snappfood:license:{license_key}", json.dumps(redis_data, ensure_ascii=False))
         except Exception as e:
             logger.error(f"خطا در ذخیره ردیس: {e}")
 
@@ -945,7 +788,6 @@ async def _save_and_reply(
     )
     return ASK_NEXT_ACTION
 
-
 async def next_line_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -959,7 +801,6 @@ async def next_line_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode='Markdown'
     )
     return ASK_PHONE
-
 
 async def finish_session_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -983,9 +824,7 @@ async def finish_session_callback(update: Update, context: ContextTypes.DEFAULT_
         )
         await query.message.reply_text(msg, parse_mode='Markdown')
     else:
-        await query.message.reply_text(
-            "ℹ️  هیچ لایسنسی در این جلسه تولید نشد.\n\nبرای شروع: /start"
-        )
+        await query.message.reply_text("ℹ️  هیچ لایسنسی در این جلسه تولید نشد.\n\nبرای شروع: /start")
     return ConversationHandler.END
 
 
@@ -1007,103 +846,20 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, reply_markup=kb_admin_main(), parse_mode='Markdown')
 
-
 async def delete_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ALLOWED_USER_IDS:
         return
     if not context.args:
-        await update.message.reply_text(
-            "⚠️  *نحوه استفاده:*\n`/delete BARANLINK-XXXX-XXXX`",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text("⚠️  *نحوه استفاده:*\n`/delete BARANLINK-XXXX-XXXX`", parse_mode='Markdown')
         return
     license_key = context.args[0].strip()
     if not license_key.startswith("BARANLINK"):
         await update.message.reply_text("⚠️  فرمت لایسنس نامعتبر است.", parse_mode='Markdown')
         return
     if redis_client and redis_client.delete(f"snappfood:license:{license_key}"):
-        await update.message.reply_text(
-            f"✅  لایسنس `{license_key}` با موفقیت از دیتابیس حذف شد.", parse_mode='Markdown'
-        )
+        await update.message.reply_text(f"✅  لایسنس `{license_key}` با موفقیت از دیتابیس حذف شد.", parse_mode='Markdown')
     else:
-        await update.message.reply_text(
-            f"⚠️  لایسنس `{license_key}` در دیتابیس یافت نشد.", parse_mode='Markdown'
-        )
-
-
-async def process_database_rebuild(chat_id: int, bot):
-    """بازسازی توکن‌ها در پس‌زمینه."""
-    if not redis_client:
-        await bot.send_message(chat_id=chat_id, text="❌  دیتابیس ردیس متصل نیست!")
-        return
-
-    keys = redis_client.keys("snappfood:license:*")
-    total = len(keys)
-    if total == 0:
-        await bot.send_message(chat_id=chat_id, text="ℹ️  هیچ رکوردی در دیتابیس یافت نشد.")
-        return
-
-    success_count, fail_count = 0, 0
-    await bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🔄  *شروع بازسازی توکن‌ها*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊  مجموع رکوردها: `{total}`\n"
-            f"⏳  لطفاً صبر کنید..."
-        ),
-        parse_mode='Markdown'
-    )
-
-    for key in keys:
-        try:
-            raw = redis_client.get(key)
-            if not raw:
-                fail_count += 1
-                continue
-            data    = json.loads(raw)
-            phone   = data.get("phone_number")
-            r_token = data.get("refresh_token")
-
-            if not phone or not r_token:
-                fail_count += 1
-                continue
-
-            res = await asyncio.to_thread(refresh_short_token, r_token)
-            new_data_dict = res.get('data') or {}
-            new_access    = new_data_dict.get('accessToken')
-            new_refresh   = new_data_dict.get('refreshToken')
-
-            if res.get('status') and new_access:
-                data["access_token"]  = new_access
-                data["refresh_token"] = new_refresh or r_token
-                data["updated_at"]    = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                redis_client.set(key, json.dumps(data, ensure_ascii=False))
-                success_count += 1
-            else:
-                logger.warning(f"رفرش ناموفق برای {phone}: {res.get('error')}")
-                fail_count += 1
-
-        except Exception as ex:
-            logger.error(f"خطا در بازسازی {key}: {ex}")
-            fail_count += 1
-
-        await asyncio.sleep(2)
-
-    await bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅  *بازسازی پایان یافت*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            f"📊  مجموع: `{total}`\n"
-            f"🟢  موفق: `{success_count}`\n"
-            f"🔴  ناموفق: `{fail_count}`\n\n"
-            f"💡  می‌توانید بکاپ بگیرید."
-        ),
-        parse_mode='Markdown'
-    )
+        await update.message.reply_text(f"⚠️  لایسنس `{license_key}` در دیتابیس یافت نشد.", parse_mode='Markdown')
 
 
 async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1125,9 +881,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📊  تعداد رکوردها: `{record_count}`\n\n"
             "یک گزینه را انتخاب کنید:"
         )
-        await query.edit_message_text(
-            text, reply_markup=kb_admin_main(), parse_mode='Markdown'
-        )
+        await query.edit_message_text(text, reply_markup=kb_admin_main(), parse_mode='Markdown')
 
     elif not redis_client:
         await query.answer("❌ دیتابیس ردیس متصل نیست!", show_alert=True)
@@ -1152,11 +906,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ دیتابیس خالی است!", show_alert=True)
             return
         await query.answer("درحال آماده‌سازی فایل بکاپ...")
-        lines = [
-            "فایل بکاپ دیتابیس (لایسنس‌ها)",
-            f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "-" * 40, ""
-        ]
+        lines = ["فایل بکاپ دیتابیس (لایسنس‌ها)", f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "-" * 40, ""]
         for k in keys:
             try:
                 data = json.loads(redis_client.get(k))
@@ -1170,15 +920,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc = io.BytesIO(content.encode('utf-8'))
         doc.seek(0)
         doc.name = f"Backup_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-        await query.message.reply_document(
-            doc,
-            caption=(
-                f"📥  *فایل بکاپ دیتابیس*\n"
-                f"📊  تعداد رکوردها: `{len(keys)}`\n"
-                f"🕐  زمان: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
-            ),
-            parse_mode='Markdown'
-        )
+        await query.message.reply_document(doc, caption=f"📥  *فایل بکاپ دیتابیس*\n📊  تعداد رکوردها: `{len(keys)}`\n🕐  زمان: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`", parse_mode='Markdown')
 
     elif query.data == 'admin_extract_tokens':
         keys = redis_client.keys("snappfood:license:*")
@@ -1186,11 +928,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ دیتابیس خالی است!", show_alert=True)
             return
         await query.answer("درحال آماده‌سازی فایل توکن‌ها...")
-        lines = [
-            "لیست کامل توکن‌ها به همراه لایسنس‌ها",
-            f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "=" * 60, ""
-        ]
+        lines = ["لیست کامل توکن‌ها به همراه لایسنس‌ها", f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "=" * 60, ""]
         for k in keys:
             try:
                 data = json.loads(redis_client.get(k))
@@ -1206,24 +944,30 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         doc = io.BytesIO(content.encode('utf-8'))
         doc.seek(0)
         doc.name = f"Tokens_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-        await query.message.reply_document(
-            doc,
-            caption=(
-                f"🔑  *فایل جامع توکن‌ها و لایسنس‌ها*\n"
-                f"📊  تعداد رکوردها: `{len(keys)}`\n"
-                f"🕐  زمان: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n"
-                f"⚠️  این فایل حساس است. مراقب باشید."
-            ),
-            parse_mode='Markdown'
-        )
+        await query.message.reply_document(doc, caption=f"🔑  *فایل جامع توکن‌ها و لایسنس‌ها*\n📊  تعداد رکوردها: `{len(keys)}`\n🕐  زمان: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`\n\n⚠️  این فایل حساس است. مراقب باشید.", parse_mode='Markdown')
 
     elif query.data == 'admin_rebuild':
+        async def background_rebuild():
+            await process_database_rebuild(query.message.chat_id, context.bot)
+            db_status = "🟢 متصل" if redis_client else "🔴 قطع"
+            record_count = len(redis_client.keys("snappfood:license:*")) if redis_client else 0
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=(
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "⚙️  *پنل مدیریت*\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"🗄  وضعیت دیتابیس: {db_status}\n"
+                    f"📊  تعداد رکوردها: `{record_count}`\n\n"
+                    "یک گزینه را انتخاب کنید:"
+                ),
+                reply_markup=kb_admin_main(),
+                parse_mode='Markdown'
+            )
+
         await query.answer("عملیات بازسازی شروع شد...")
-        await query.edit_message_text(
-            "🔄  *عملیات بازسازی در پس‌زمینه آغاز شد...*\n\nبه محض پایان نتیجه ارسال می‌شود.",
-            parse_mode='Markdown'
-        )
-        asyncio.ensure_future(process_database_rebuild(query.message.chat_id, context.bot))
+        await query.edit_message_text("🔄  *عملیات بازسازی در پس‌زمینه آغاز شد...*\n\nبه محض پایان نتیجه ارسال می‌شود.", parse_mode='Markdown')
+        asyncio.ensure_future(background_rebuild())
 
     elif query.data == 'admin_discount_check':
         await query.answer("چکر تخفیف در پس‌زمینه شروع شد.")
@@ -1231,20 +975,13 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎁  *چکر تخفیف فعال شد*\n\n"
             "حساب‌ها به‌ترتیب و با فاصله زمانی متعادل بررسی می‌شوند.\n"
             "پس از پایان، فایل گزارش متنی ارسال خواهد شد.",
-            parse_mode='Markdown',
-            reply_markup=kb_back_to_admin()
+            parse_mode='Markdown'
         )
-        asyncio.ensure_future(
-            process_discount_check(query.message.chat_id, context.bot)
-        )
+        asyncio.ensure_future(process_discount_check(query.message.chat_id, context.bot))
 
     elif query.data == 'admin_delete_hint':
         await query.answer()
-        await query.message.reply_text(
-            "🗑  *حذف لایسنس از دیتابیس:*\n\n"
-            "دستور زیر را ارسال کنید:\n`/delete BARANLINK-XXXX-XXXX`",
-            parse_mode='Markdown'
-        )
+        await query.message.reply_text("🗑  *حذف لایسنس از دیتابیس:*\n\nدستور زیر را ارسال کنید:\n`/delete BARANLINK-XXXX-XXXX`", parse_mode='Markdown')
 
     elif query.data == 'admin_back':
         await query.answer()
@@ -1262,11 +999,9 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer()
 
-
 # ======================== اجرای همزمان ربات + وب‌سرور ========================
 
 async def run_bot():
-    """اجرای ربات تلگرام به صورت async."""
     if not TELEGRAM_BOT_TOKEN:
         logger.critical("❌ TELEGRAM_BOT_TOKEN تنظیم نشده است!")
         return
@@ -1278,23 +1013,23 @@ async def run_bot():
         states={
             ASK_PHONE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ask_phone),
-                CallbackQueryHandler(cancel_action, pattern='^cancel$')
+                CallbackQueryHandler(cancel_action, pattern='^cancel$'),
             ],
             ASK_CODE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, ask_code),
                 CallbackQueryHandler(resend_code_callback, pattern='^resend_code$'),
-                CallbackQueryHandler(cancel_action,         pattern='^cancel$')
+                CallbackQueryHandler(cancel_action,         pattern='^cancel$'),
             ],
             ASK_NEXT_ACTION: [
                 CallbackQueryHandler(next_line_callback,      pattern='^next_line$'),
                 CallbackQueryHandler(finish_session_callback,  pattern='^finish_session$'),
-                CallbackQueryHandler(cancel_action,            pattern='^cancel$')
+                CallbackQueryHandler(cancel_action,            pattern='^cancel$'),
             ]
         },
         fallbacks=[
             CommandHandler("cancel", cancel_action),
             CommandHandler("start",  start),
-            CallbackQueryHandler(exit_to_admin, pattern='^admin_open$'),
+            CallbackQueryHandler(exit_to_admin, pattern='^admin_open$')
         ],
         allow_reentry=True,
     )
@@ -1311,12 +1046,9 @@ async def run_bot():
     await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
     logger.info("🤖 ربات با موفقیت راه‌اندازی شد.")
 
-    # منتظر می‌ماند تا سیگنال توقف بیاید
     await asyncio.Event().wait()
 
-
 async def run_webserver():
-    """اجرای وب‌سرور FastAPI."""
     config = uvicorn.Config(
         app=app,
         host="0.0.0.0",
@@ -1327,14 +1059,11 @@ async def run_webserver():
     logger.info(f"🌐 وب‌سرور روی پورت {PORT} در حال راه‌اندازی...")
     await server.serve()
 
-
 async def main():
-    """اجرای همزمان ربات تلگرام و وب‌سرور."""
     await asyncio.gather(
         run_bot(),
         run_webserver()
     )
-
 
 if __name__ == "__main__":
     asyncio.run(main())
