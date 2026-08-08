@@ -12,7 +12,6 @@ import urllib3
 import random
 from datetime import datetime
 from typing import Optional
-from curl_cffi import requests as cffi_requests
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import JSONResponse
 import uvicorn
@@ -166,15 +165,10 @@ def refresh_short_token(short_refresh_token: str) -> dict:
     """بازسازی توکن با اندپوینت کوتاه یکبار مصرف."""
     device_uid = str(uuid.uuid4())
 
-    headers = {
+    headers = BASE_HEADERS.copy()
+    headers.update({
         'authority': 'user.snappfood.ir',
-        'accept': 'application/json, text/plain, */*',
-        'accept-language': 'fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7',
-        'content-type': 'application/json',
-        'origin': 'https://snappfood.ir',
-        'referer': 'https://snappfood.ir/',
-        'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
-    }
+    })
 
     payload = {
         "refreshToken": short_refresh_token,
@@ -189,14 +183,13 @@ def refresh_short_token(short_refresh_token: str) -> dict:
     }
 
     try:
-        res = cffi_requests.post(
+        res = requests.post(
             "https://user.snappfood.ir/v1/auth/token",
             json=payload,
             headers=headers,
             proxies=SNAPPFOOD_PROXIES,
-            impersonate="chrome116",
-            timeout=20,
-            verify=False
+            verify=False,
+            timeout=20
         )
 
         if res.status_code == 200:
@@ -208,13 +201,21 @@ def refresh_short_token(short_refresh_token: str) -> dict:
                     'status': True,
                     'data': {'accessToken': new_access, 'refreshToken': new_refresh}
                 }
-            return {'status': False, 'error': 'accessToken در پاسخ وجود ندارد'}
+            return {'status': False, 'error': 'توکن جدید در پاسخ سرور یافت نشد.'}
 
-        logger.error(f"رفرش توکن — HTTP {res.status_code}: {res.text[:200]}")
-        return {'status': False, 'error': f"HTTP {res.status_code}: {res.text[:150]}"}
+        # تلاش برای استخراج متن خطای دقیق سرور اسنپ‌فود
+        err_msg = "خطای ناشناخته"
+        try:
+            resp_json = res.json()
+            err_msg = resp_json.get("error") or resp_json.get("message") or res.text[:100]
+        except Exception:
+            err_msg = res.text[:100]
+
+        logger.error(f"رفرش توکن — HTTP {res.status_code}: {err_msg}")
+        return {'status': False, 'error': f"HTTP {res.status_code}: {err_msg}"}
 
     except Exception as e:
-        logger.error(f"خطای رفرش توکن: {e}")
+        logger.error(f"خطای رفرش توکن (Network): {e}")
         return {'status': False, 'error': str(e)}
 
 # =================================================================
@@ -241,9 +242,11 @@ def exchange_food_token_for_market_token(
         "sso_channel": SNAPP_MARKET_SSO_CHANNEL,
         **_market_common_params(device_uid),
     }
+    # هدر User-Agent برای عبور از فایروال ArvanCloud الزامی است
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "fa-IR, fa;q=0.9,en;q=0.8",
+        "User-Agent": BASE_HEADERS["user-agent"],
     }
 
     try:
@@ -283,10 +286,12 @@ def exchange_food_token_for_market_token(
 
 def fetch_market_vouchers(market_access_token: str, device_uid: str) -> dict:
     """دریافت ووچرهای اختصاصی حساب از صفحه All ووچرهای اسنپ‌مارکت."""
+    # هدر User-Agent برای عبور از فایروال ArvanCloud الزامی است
     headers = {
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "fa-IR, fa;q=0.9,en;q=0.8",
         "Authorization": f"Bearer {market_access_token}",
+        "User-Agent": BASE_HEADERS["user-agent"],
     }
     vouchers = []
 
@@ -347,7 +352,6 @@ def fetch_market_vouchers(market_access_token: str, device_uid: str) -> dict:
 def check_account_discounts(record: dict) -> dict:
     """
     احراز هویت یک حساب و خواندن تخفیف‌های آن.
-    هیچ توکنی در مقدار برگشتی یا لاگ‌ها قرار نمی‌گیرد.
     """
     access_token = record.get("access_token")
     refresh_token = record.get("refresh_token")
@@ -387,8 +391,10 @@ def check_account_discounts(record: dict) -> dict:
         refresh_data = refresh_result.get("data") or {}
         new_access = refresh_data.get("accessToken")
         new_refresh = refresh_data.get("refreshToken") or refresh_token
+        
         if not refresh_result.get("status") or not new_access:
-            return {"status": False, "error_code": "refresh_failed"}
+            err = refresh_result.get("error", "refresh_failed")
+            return {"status": False, "error_code": f"Refresh Error: {err}"}
 
         access_token = new_access
         refresh_token = new_refresh
