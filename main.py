@@ -396,9 +396,11 @@ def _text_value(value, default="نامشخص") -> str:
     if value is None or value == "": return default
     return str(value).replace("\r", " ").replace("\n", " ").strip()
 
-def build_discount_report(results: list[dict]) -> str:
+def build_discount_report(results: list[dict], account_type: str) -> str:
+    account_title = "اکانت‌های جدید/خام (raw)" if account_type == "raw" else "اکانت‌های قدیمی (old)"
     lines = [
         "گزارش چکر تخفیف اسنپ‌مارکت",
+        f"بخش: {account_title}",
         f"تاریخ بررسی: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         "=" * 72, ""
     ]
@@ -427,6 +429,13 @@ def build_discount_report(results: list[dict]) -> str:
     ])
     return "\n".join(lines)
 
+async def safe_edit_discount_progress(progress_message, text: str) -> None:
+    """به‌روزرسانی وضعیت زنده بدون ایجاد اختلال در فرآیند اصلی چکر."""
+    try:
+        await progress_message.edit_text(text, parse_mode="Markdown")
+    except Exception as e:
+        logger.warning(f"به‌روزرسانی گزارش زنده چکر ناموفق بود: {e}")
+
 async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
     async with discount_check_lock:
         if not redis_client:
@@ -448,10 +457,31 @@ async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
             await bot.send_message(chat_id=chat_id, text=f"ℹ️ هیچ لایسنس اکانت {title} برای بررسی در دیتابیس نیست.")
             return
         title = "خطوط خام" if account_type == "raw" else "خطوط قدیمی"
-        await bot.send_message(chat_id=chat_id, text=f"🔎 *چکر تخفیف ({title}) شروع شد*\n\nتعداد لایسنس‌ها: `{len(keys)}`\nدرخواست‌ها با فاصله‌ی ۸ تا ۱۵ ثانیه ارسال می‌شوند؛ نتیجه در فایل متنی ارسال خواهد شد.", parse_mode="Markdown")
+        progress_message = await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🔎 *گزارش زنده چکر تخفیف ({title})*\n\n"
+                "وضعیت: در صف بررسی\n"
+                f"پیشرفت: `0/{len(keys)}`\n"
+                "درخواست‌ها با فاصله‌ی ۸ تا ۱۵ ثانیه ارسال می‌شوند."
+            ),
+            parse_mode="Markdown"
+        )
         results = []
+        checked_count = 0
         for key in keys:
             raw = None
+            record = {}
+            license_key = key.split(":")[-1]
+            await safe_edit_discount_progress(
+                progress_message,
+                (
+                    f"🔎 *گزارش زنده چکر تخفیف ({title})*\n\n"
+                    f"وضعیت: در حال بررسی `#{checked_count + 1}`\n"
+                    f"پیشرفت: `{checked_count}/{len(keys)}`\n"
+                    f"لایسنس فعلی: `{license_key}`"
+                )
+            )
             try:
                 raw = redis_client.get(key)
                 record = json.loads(raw) if raw else {}
@@ -466,9 +496,38 @@ async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
                     "license_key": record.get("license_key") or key.split(":")[-1],
                 })
             except Exception:
-                results.append({"status": "error", "error_code": "unexpected_check_error", "vouchers": [], "phone_number": "نامشخص", "license_key": key.split(":")[-1]})
-            if key != keys[-1]: await asyncio.sleep(random.uniform(DISCOUNT_CHECK_MIN_DELAY, DISCOUNT_CHECK_MAX_DELAY))
-        content = build_discount_report(results)
+                results.append({"status": "error", "error_code": "unexpected_check_error", "vouchers": [], "phone_number": "نامشخص", "license_key": license_key})
+
+            checked_count += 1
+            latest_result = results[-1]
+            if latest_result.get("status") == "ok":
+                latest_status = f"✅ بررسی انجام شد؛ تخفیف پیدا شده: `{len(latest_result.get('vouchers', []))}`"
+            else:
+                latest_status = f"⚠️ خطا در بررسی: `{_text_value(latest_result.get('error_code'))}`"
+            await safe_edit_discount_progress(
+                progress_message,
+                (
+                    f"🔎 *گزارش زنده چکر تخفیف ({title})*\n\n"
+                    f"وضعیت: {latest_status}\n"
+                    f"پیشرفت: `{checked_count}/{len(keys)}`\n"
+                    f"آخرین لایسنس: `{_text_value(latest_result.get('license_key'))}`\n"
+                    f"شماره: `{_text_value(latest_result.get('phone_number'))}`\n"
+                    f"تعداد تخفیف‌های پیدا شده تا این لحظه: `{sum(len(item.get('vouchers', [])) for item in results)}`"
+                )
+            )
+            if key != keys[-1]:
+                delay = random.uniform(DISCOUNT_CHECK_MIN_DELAY, DISCOUNT_CHECK_MAX_DELAY)
+                await safe_edit_discount_progress(
+                    progress_message,
+                    (
+                        f"🔎 *گزارش زنده چکر تخفیف ({title})*\n\n"
+                        f"پیشرفت: `{checked_count}/{len(keys)}`\n"
+                        f"آخرین لایسنس: `{_text_value(latest_result.get('license_key'))}`\n"
+                        f"⏳ مکث امنیتی حدود `{int(delay)} ثانیه` تا درخواست بعدی..."
+                    )
+                )
+                await asyncio.sleep(delay)
+        content = build_discount_report(results, account_type)
         doc = io.BytesIO(content.encode("utf-8"))
         doc.name = f"Discount_Check_{account_type}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
         await bot.send_document(chat_id=chat_id, document=doc, caption=f"✅ *بررسی تخفیف‌های {title} پایان یافت*\nلایسنس‌های بررسی‌شده: `{len(results)}`\nتعداد تخفیف‌ها: `{sum(len(item.get('vouchers', [])) for item in results)}`", parse_mode="Markdown")
@@ -1026,15 +1085,34 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ دیتابیس خالی است!", show_alert=True)
             return
         await query.answer("درحال آماده‌سازی بکاپ...")
-        lines = ["فایل بکاپ (لایسنس‌ها)", f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "-" * 40, ""]
+        records_by_type = {"raw": [], "old": []}
         for k in keys:
             try:
-                data = json.loads(redis_client.get(k))
+                raw = redis_client.get(k)
+                data = json.loads(raw) if raw else {}
+                records_by_type[get_account_type(data)].append((k, data))
+            except Exception:
+                records_by_type["raw"].append((k, {}))
+
+        lines = [
+            "فایل بکاپ (لایسنس‌ها)",
+            f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "-" * 40,
+            ""
+        ]
+        for account_type, title in (("raw", "اکانت‌های جدید/خام (raw)"), ("old", "اکانت‌های قدیمی (old)")):
+            records = records_by_type[account_type]
+            lines.extend([
+                f"########## {title} ##########",
+                f"تعداد: {len(records)}",
+                ""
+            ])
+            for k, data in records:
                 lines.append(f"لایسنس:          {data.get('license_key', k.split(':')[-1])}")
                 lines.append(f"شماره موبایل:    {data.get('phone_number', 'نامشخص')}")
                 lines.append(f"آخرین بروزرسانی: {data.get('updated_at', 'نامشخص')}")
                 lines.append("-" * 40)
-            except Exception: pass
+            lines.append("")
         doc = io.BytesIO("\n".join(lines).encode('utf-8'))
         doc.name = f"Backup_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
         await query.message.reply_document(doc, caption=f"📥  *فایل بکاپ*\n📊  رکوردها: `{len(keys)}`", parse_mode='Markdown')
@@ -1059,7 +1137,7 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "=" * 60,
             ""
         ]
-        for account_type, title in (("raw", "اکانت‌های خام (raw)"), ("old", "اکانت‌های قدیمی (old)")):
+        for account_type, title in (("raw", "اکانت‌های جدید/خام (raw)"), ("old", "اکانت‌های قدیمی (old)")):
             records = records_by_type[account_type]
             lines.extend([
                 f"########## {title} ##########",
