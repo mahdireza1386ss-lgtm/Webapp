@@ -1,0 +1,5 @@
+[providers]
+python = "3.11"
+
+[phases.setup]
+aptPkgs = ["build-essential", "python3-dev", "libffi-dev", "libssl-dev"]
