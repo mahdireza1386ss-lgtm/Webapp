@@ -72,7 +72,6 @@ SNAPP_MARKET_VERIFY_TLS = False
 # فاصله‌ی عمدی و زیاد بین درخواست‌های چکر برای کاهش ریسک مسدودی
 DISCOUNT_CHECK_MIN_DELAY = 8.0
 DISCOUNT_CHECK_MAX_DELAY = 15.0
-DISCOUNT_CHECK_COOLDOWN = max(30.0, float(os.getenv("DISCOUNT_CHECK_COOLDOWN", "900")))
 DISCOUNT_CHECK_MAX_PAGES = max(1, min(20, int(os.getenv("DISCOUNT_CHECK_MAX_PAGES", "5"))))
 
 try:
@@ -104,7 +103,6 @@ EXPRESS_HEADERS = {
 }
 
 discount_check_lock = asyncio.Lock()
-last_discount_check_at = 0.0
 
 # ======================== وب‌سرور FastAPI ========================
 app = FastAPI(title="Baran Token API", docs_url=None, redoc_url=None)
@@ -430,13 +428,7 @@ def build_discount_report(results: list[dict]) -> str:
     return "\n".join(lines)
 
 async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
-    global last_discount_check_at
     async with discount_check_lock:
-        now = time.monotonic()
-        remaining = DISCOUNT_CHECK_COOLDOWN - (now - last_discount_check_at)
-        if last_discount_check_at and remaining > 0:
-            await bot.send_message(chat_id=chat_id, text=f"⏱️ چکر اخیراً اجرا شده است.\nلطفاً {int(remaining) + 1} ثانیه دیگر دوباره تلاش کنید.")
-            return
         if not redis_client:
             await bot.send_message(chat_id=chat_id, text="❌ دیتابیس ردیس متصل نیست!")
             return
@@ -455,7 +447,6 @@ async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
             title = "خام" if account_type == "raw" else "قدیمی"
             await bot.send_message(chat_id=chat_id, text=f"ℹ️ هیچ لایسنس اکانت {title} برای بررسی در دیتابیس نیست.")
             return
-        last_discount_check_at = now
         title = "خطوط خام" if account_type == "raw" else "خطوط قدیمی"
         await bot.send_message(chat_id=chat_id, text=f"🔎 *چکر تخفیف ({title}) شروع شد*\n\nتعداد لایسنس‌ها: `{len(keys)}`\nدرخواست‌ها با فاصله‌ی ۸ تا ۱۵ ثانیه ارسال می‌شوند؛ نتیجه در فایل متنی ارسال خواهد شد.", parse_mode="Markdown")
         results = []
@@ -558,6 +549,7 @@ def kb_next_or_finish() -> InlineKeyboardMarkup:
 def kb_admin_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊  آمار دیتابیس", callback_data='admin_stats'), InlineKeyboardButton("🔑  استخراج گزارش کامل", callback_data='admin_extract_tokens')],
+        [InlineKeyboardButton("➕  تولید لایسنس جدید", callback_data='admin_new_license')],
         [InlineKeyboardButton("➕  ثبت لایسنس اکانت قدیمی", callback_data='admin_old_license')],
         [InlineKeyboardButton("🔄  بازسازی اتصال‌ها", callback_data='admin_rebuild')],
         [InlineKeyboardButton("🎁  چکر تخفیف (خطوط خام)", callback_data='admin_discount_check_raw')],
@@ -607,15 +599,34 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     context.user_data.clear()
-    context.user_data['session_phones'] = []
+    stats = get_database_account_stats()
     text = (
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "🌧  *ربات تولید لایسنس Baran*\n"
+        "⚙️  *پنل اصلی مدیریت Baran*\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "📱  ابتدا شماره موبایل مشتری را وارد کنید:\n"
-        "_(فرمت صحیح: `09XXXXXXXXX`)_"
+        f"🗄  وضعیت دیتابیس: {'🟢 متصل' if redis_client else '🔴 قطع'}\n"
+        f"📊  مجموع رکوردها: `{stats['total']}`\n"
+        f"🟠  اکانت‌های خام: `{stats['raw']}`\n"
+        f"🔵  اکانت‌های قدیمی: `{stats['old']}`\n\n"
+        "یک گزینه را انتخاب کنید:"
     )
-    await update.message.reply_text(text, reply_markup=kb_cancel(), parse_mode='Markdown')
+    await update.message.reply_text(text, reply_markup=kb_admin_main(), parse_mode='Markdown')
+    return ConversationHandler.END
+
+async def start_raw_license_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    context.user_data.clear()
+    context.user_data['session_phones'] = []
+    await query.answer()
+    await query.edit_message_text(
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "➕  *تولید لایسنس جدید*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📱  شماره موبایل مشتری را وارد کنید:\n"
+        "_(فرمت صحیح: `09XXXXXXXXX`)_",
+        reply_markup=kb_cancel(),
+        parse_mode='Markdown'
+    )
     return ASK_PHONE
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -625,7 +636,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "📖  *راهنمای ربات*\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "🔹 /start  —  تولید لایسنس جدید\n"
+        "🔹 /start  —  نمایش پنل اصلی مدیریت\n"
         "🔹 /admin  —  پنل مدیریت\n"
         "🔹 /delete `BARANLINK-XXXX`  —  حذف لایسنس از دیتابیس\n"
         "🔹 /cancel  —  لغو عملیات جاری\n"
@@ -1112,6 +1123,7 @@ async def run_bot():
         },
         fallbacks=[
             CommandHandler("cancel", cancel_action),
+            CommandHandler("start", start),
             CallbackQueryHandler(exit_to_admin, pattern='^admin_open$')
         ],
         allow_reentry=True,
@@ -1119,7 +1131,10 @@ async def run_bot():
     application.add_handler(old_license_conv_handler)
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+        entry_points=[
+            CommandHandler("start", start),
+            CallbackQueryHandler(start_raw_license_callback, pattern='^admin_new_license$')
+        ],
         states={
             ASK_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_phone), CallbackQueryHandler(cancel_action, pattern='^cancel$')],
             ASK_CODE_STEP_1: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_code_step_1), CallbackQueryHandler(resend_code_1_callback, pattern='^resend_code_1$'), CallbackQueryHandler(cancel_action, pattern='^cancel$')],
