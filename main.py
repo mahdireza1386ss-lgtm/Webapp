@@ -69,8 +69,9 @@ SNAPP_MARKET_LONG = os.getenv("SNAPP_MARKET_LONG", "51.418311")
 SNAPP_MARKET_SSO_CHANNEL = os.getenv("SNAPP_MARKET_SSO_CHANNEL", "food")
 SNAPP_MARKET_VERIFY_TLS = False
 
-DISCOUNT_CHECK_MIN_DELAY = max(1.0, float(os.getenv("DISCOUNT_CHECK_MIN_DELAY", "2.5")))
-DISCOUNT_CHECK_MAX_DELAY = max(DISCOUNT_CHECK_MIN_DELAY, float(os.getenv("DISCOUNT_CHECK_MAX_DELAY", "5.0")))
+# فاصله‌ی عمدی و زیاد بین درخواست‌های چکر برای کاهش ریسک مسدودی
+DISCOUNT_CHECK_MIN_DELAY = 8.0
+DISCOUNT_CHECK_MAX_DELAY = 15.0
 DISCOUNT_CHECK_COOLDOWN = max(30.0, float(os.getenv("DISCOUNT_CHECK_COOLDOWN", "900")))
 DISCOUNT_CHECK_MAX_PAGES = max(1, min(20, int(os.getenv("DISCOUNT_CHECK_MAX_PAGES", "5"))))
 
@@ -371,6 +372,28 @@ def check_account_discounts(record: dict) -> dict:
         record["access_token"], record["refresh_token"], record["device_uid"] = new_access, new_refresh, device_uid
     return {"status": False, "error_code": "check_failed"}
 
+def get_account_type(record: dict) -> str:
+    """رکوردهای قدیمی که این فیلد را ندارند، خام محسوب می‌شوند."""
+    return "old" if record.get("account_type") == "old" else "raw"
+
+def get_database_account_stats() -> dict:
+    stats = {"total": 0, "raw": 0, "old": 0}
+    if not redis_client:
+        return stats
+
+    for key in redis_client.keys("snappfood:license:*"):
+        try:
+            raw = redis_client.get(key)
+            record = json.loads(raw) if raw else {}
+            account_type = get_account_type(record)
+            stats["total"] += 1
+            stats[account_type] += 1
+        except Exception:
+            # داده‌های قدیمی یا خراب برای حفظ رفتار سازگار، خام در نظر گرفته می‌شوند.
+            stats["total"] += 1
+            stats["raw"] += 1
+    return stats
+
 def _text_value(value, default="نامشخص") -> str:
     if value is None or value == "": return default
     return str(value).replace("\r", " ").replace("\n", " ").strip()
@@ -406,7 +429,7 @@ def build_discount_report(results: list[dict]) -> str:
     ])
     return "\n".join(lines)
 
-async def process_discount_check(chat_id: int, bot) -> None:
+async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
     global last_discount_check_at
     async with discount_check_lock:
         now = time.monotonic()
@@ -417,12 +440,24 @@ async def process_discount_check(chat_id: int, bot) -> None:
         if not redis_client:
             await bot.send_message(chat_id=chat_id, text="❌ دیتابیس ردیس متصل نیست!")
             return
-        keys = redis_client.keys("snappfood:license:*")
+        all_keys = redis_client.keys("snappfood:license:*")
+        keys = []
+        for key in all_keys:
+            try:
+                raw = redis_client.get(key)
+                record = json.loads(raw) if raw else {}
+                if get_account_type(record) == account_type:
+                    keys.append(key)
+            except Exception:
+                if account_type == "raw":
+                    keys.append(key)
         if not keys:
-            await bot.send_message(chat_id=chat_id, text="ℹ️ هیچ لایسنسی برای بررسی در دیتابیس نیست.")
+            title = "خام" if account_type == "raw" else "قدیمی"
+            await bot.send_message(chat_id=chat_id, text=f"ℹ️ هیچ لایسنس اکانت {title} برای بررسی در دیتابیس نیست.")
             return
         last_discount_check_at = now
-        await bot.send_message(chat_id=chat_id, text=f"🔎 *چکر تخفیف شروع شد*\n\nتعداد لایسنس‌ها: `{len(keys)}`\nدرخواست‌ها به‌صورت متعادل ارسال می‌شوند؛ نتیجه در فایل متنی ارسال خواهد شد.", parse_mode="Markdown")
+        title = "خطوط خام" if account_type == "raw" else "خطوط قدیمی"
+        await bot.send_message(chat_id=chat_id, text=f"🔎 *چکر تخفیف ({title}) شروع شد*\n\nتعداد لایسنس‌ها: `{len(keys)}`\nدرخواست‌ها با فاصله‌ی ۸ تا ۱۵ ثانیه ارسال می‌شوند؛ نتیجه در فایل متنی ارسال خواهد شد.", parse_mode="Markdown")
         results = []
         for key in keys:
             raw = None
@@ -444,8 +479,8 @@ async def process_discount_check(chat_id: int, bot) -> None:
             if key != keys[-1]: await asyncio.sleep(random.uniform(DISCOUNT_CHECK_MIN_DELAY, DISCOUNT_CHECK_MAX_DELAY))
         content = build_discount_report(results)
         doc = io.BytesIO(content.encode("utf-8"))
-        doc.name = f"Discount_Check_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-        await bot.send_document(chat_id=chat_id, document=doc, caption=f"✅ *بررسی تخفیف‌ها پایان یافت*\nلایسنس‌های بررسی‌شده: `{len(results)}`\nتعداد تخفیف‌ها: `{sum(len(item.get('vouchers', [])) for item in results)}`", parse_mode="Markdown")
+        doc.name = f"Discount_Check_{account_type}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
+        await bot.send_document(chat_id=chat_id, document=doc, caption=f"✅ *بررسی تخفیف‌های {title} پایان یافت*\nلایسنس‌های بررسی‌شده: `{len(results)}`\nتعداد تخفیف‌ها: `{sum(len(item.get('vouchers', [])) for item in results)}`", parse_mode="Markdown")
         await bot.send_message(chat_id=chat_id, text="⚙️ *پنل مدیریت*\n\nپنل برای دسترسی سریع دوباره در دسترس است:", reply_markup=kb_admin_main(), parse_mode="Markdown")
 
 async def process_database_rebuild(chat_id: int, bot):
@@ -522,15 +557,23 @@ def kb_next_or_finish() -> InlineKeyboardMarkup:
 
 def kb_admin_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊  آمار دیتابیس", callback_data='admin_stats'), InlineKeyboardButton("🔄  بازسازی اتصال‌ها", callback_data='admin_rebuild')],
-        [InlineKeyboardButton("🎁  چکر تخفیف", callback_data='admin_discount_check')],
-        [InlineKeyboardButton("📥  استخراج فایل بکاپ", callback_data='admin_extract')],
-        [InlineKeyboardButton("🔑  استخراج گزارش کامل", callback_data='admin_extract_tokens')],
-        [InlineKeyboardButton("🗑  حذف لایسنس", callback_data='admin_delete_hint')]
+        [InlineKeyboardButton("📊  آمار دیتابیس", callback_data='admin_stats'), InlineKeyboardButton("🔑  استخراج گزارش کامل", callback_data='admin_extract_tokens')],
+        [InlineKeyboardButton("➕  ثبت لایسنس اکانت قدیمی", callback_data='admin_old_license')],
+        [InlineKeyboardButton("🔄  بازسازی اتصال‌ها", callback_data='admin_rebuild')],
+        [InlineKeyboardButton("🎁  چکر تخفیف (خطوط خام)", callback_data='admin_discount_check_raw')],
+        [InlineKeyboardButton("🎁  چکر تخفیف (خطوط قدیمی)", callback_data='admin_discount_check_old')],
+        [InlineKeyboardButton("📥  استخراج فایل بکاپ", callback_data='admin_extract'), InlineKeyboardButton("🗑  حذف لایسنس", callback_data='admin_delete_hint')]
     ])
 
 def kb_back_to_admin() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔙  بازگشت به پنل", callback_data='admin_back')]])
+
+def kb_old_resend_step() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄  ارسال مجدد کد اسنپ‌فود", callback_data='old_resend_code')],
+        [InlineKeyboardButton("⚙️  پنل مدیریت", callback_data='admin_open')],
+        [InlineKeyboardButton("🚫  لغو عملیات", callback_data='cancel')]
+    ])
 
 # =================================================================
 
@@ -555,6 +598,7 @@ async def exit_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 # --- مراحل ربات تلگرام ---
 ASK_PHONE, ASK_CODE_STEP_1, ASK_CODE_STEP_2, ASK_NEXT_ACTION = range(4)
+OLD_ASK_PHONE, OLD_ASK_CODE = range(4, 6)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
@@ -616,6 +660,132 @@ async def ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await wait_msg.delete()
         await update.message.reply_text(f"❌  *بروز مشکل در مرحله اول*\n\nجزئیات: `{err_msg}`\n\nعملیات لغو شد. مجددا /start بزنید.", parse_mode='Markdown')
         return ConversationHandler.END
+
+async def old_license_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    context.user_data.clear()
+    await query.answer()
+    await query.edit_message_text(
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "➕  *ثبت لایسنس اکانت قدیمی*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📱  شماره موبایل اکانت قدیمی را وارد کنید:\n"
+        "_(فرمت صحیح: `09XXXXXXXXX`)_",
+        reply_markup=kb_cancel(),
+        parse_mode='Markdown'
+    )
+    return OLD_ASK_PHONE
+
+async def old_ask_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    phone_number = update.message.text.strip()
+    if not (phone_number.startswith("09") and len(phone_number) == 11 and phone_number.isdigit()):
+        await update.message.reply_text("⚠️  شماره نامعتبر است. مجدداً ارسال کنید:", reply_markup=kb_cancel())
+        return OLD_ASK_PHONE
+
+    context.user_data['phone_number'] = phone_number
+    context.user_data['device_uid'] = str(uuid.uuid4())
+    wait_msg = await update.message.reply_text("⏳  درحال ارسال کد ورود مستقیم اسنپ‌فود...")
+    res = await asyncio.to_thread(send_food_code, phone_number)
+
+    if res.get('status') or res.get('success'):
+        await wait_msg.delete()
+        await update.message.reply_text(
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "✅  *کد ورود اسنپ‌فود ارسال شد*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"📲  کد ارسال‌شده به `{phone_number}` را وارد کنید:",
+            reply_markup=kb_old_resend_step(),
+            parse_mode='Markdown'
+        )
+        return OLD_ASK_CODE
+
+    await wait_msg.edit_text(
+        f"❌  *ارسال کد ورود با مشکل مواجه شد*\n\nجزئیات: `{res.get('error', 'ارتباط برقرار نشد.')}`\n\nعملیات لغو شد.",
+        parse_mode='Markdown'
+    )
+    return ConversationHandler.END
+
+async def old_resend_code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    phone = context.user_data.get('phone_number')
+    if not phone:
+        await query.answer("⚠️ داده‌ای یافت نشد.", show_alert=True)
+        return OLD_ASK_PHONE
+
+    await query.answer("درحال ارسال مجدد کد اسنپ‌فود...")
+    res = await asyncio.to_thread(send_food_code, phone)
+    if res.get('status') or res.get('success'):
+        await query.edit_message_text(
+            "🔄  *کد اسنپ‌فود مجدداً ارسال شد*\n\n📲  کد جدید را وارد کنید:",
+            reply_markup=kb_old_resend_step(),
+            parse_mode='Markdown'
+        )
+    else:
+        await query.edit_message_text("❌  ارسال مجدد با مشکل مواجه شد.", reply_markup=kb_old_resend_step())
+    return OLD_ASK_CODE
+
+async def old_ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = update.message.text.strip()
+    phone_number = context.user_data.get('phone_number')
+    device_uid = context.user_data.get('device_uid')
+
+    if not code.isdigit():
+        await update.message.reply_text("⚠️  لطفاً فقط اعداد را وارد کنید.", reply_markup=kb_old_resend_step())
+        return OLD_ASK_CODE
+
+    wait_msg = await update.message.reply_text("⏳  درحال ورود مستقیم به اسنپ‌فود و صدور لایسنس...")
+    res = await asyncio.to_thread(verify_food_code, phone_number, code, device_uid)
+    data_dict = res.get('data') or {}
+    access_token, refresh_token = data_dict.get('accessToken'), data_dict.get('refreshToken')
+
+    if res.get('http_status', 500) != 200 or not access_token:
+        await wait_msg.delete()
+        await update.message.reply_text(
+            "⚠️  کد اسنپ‌فود نامعتبر است یا ورود انجام نشد. مجدداً تلاش کنید:",
+            reply_markup=kb_old_resend_step()
+        )
+        return OLD_ASK_CODE
+
+    if not redis_client:
+        await wait_msg.edit_text("❌ دیتابیس ردیس متصل نیست؛ لایسنس ذخیره نشد.")
+        return ConversationHandler.END
+
+    license_key = generate_license_key()
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    redis_data = {
+        "phone_number": phone_number,
+        "device_uid": device_uid,
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "created_at": now_str,
+        "updated_at": now_str,
+        "license_key": license_key,
+        "account_type": "old"
+    }
+    try:
+        redis_client.set(
+            f"snappfood:license:{license_key}",
+            json.dumps(redis_data, ensure_ascii=False)
+        )
+    except Exception as e:
+        logger.error(f"خطا در ذخیره لایسنس قدیمی در ردیس: {e}")
+        await wait_msg.edit_text("❌ خطا در ذخیره لایسنس در دیتابیس رخ داد.")
+        return ConversationHandler.END
+
+    context.user_data.clear()
+    await wait_msg.edit_text(
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "✅  *لایسنس اکانت قدیمی با موفقیت ساخته شد!*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"🔑  لایسنس: `{license_key}`\n"
+        "🏷  نوع اکانت: `old`\n\n"
+        "لایسنس در دیتابیس ذخیره شد.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("⚙️  بازگشت به پنل مدیریت", callback_data='admin_back')]
+        ]),
+        parse_mode='Markdown'
+    )
+    return ConversationHandler.END
 
 async def resend_code_1_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -743,7 +913,8 @@ async def _save_and_reply(
         redis_data = {
             "phone_number": phone_number, "device_uid": device_uid,
             "access_token": access_token, "refresh_token": refresh_token,
-            "created_at": now_str, "updated_at": now_str, "license_key": license_key
+            "created_at": now_str, "updated_at": now_str, "license_key": license_key,
+            "account_type": "raw"
         }
         try:
             redis_client.set(f"snappfood:license:{license_key}", json.dumps(redis_data, ensure_ascii=False))
@@ -792,8 +963,8 @@ async def finish_session_callback(update: Update, context: ContextTypes.DEFAULT_
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.from_user.id not in ALLOWED_USER_IDS: return
     db_status = "🟢 متصل" if redis_client else "🔴 قطع"
-    record_count = len(redis_client.keys("snappfood:license:*")) if redis_client else 0
-    text = f"━━━━━━━━━━━━━━━━━━━━━━\n⚙️  *پنل مدیریت*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🗄  وضعیت دیتابیس: {db_status}\n📊  تعداد رکوردها: `{record_count}`\n\nیک گزینه را انتخاب کنید:"
+    stats = get_database_account_stats()
+    text = f"━━━━━━━━━━━━━━━━━━━━━━\n⚙️  *پنل مدیریت*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🗄  وضعیت دیتابیس: {db_status}\n📊  مجموع رکوردها: `{stats['total']}`\n🟠  اکانت‌های خام: `{stats['raw']}`\n🔵  اکانت‌های قدیمی: `{stats['old']}`\n\nیک گزینه را انتخاب کنید:"
     await update.message.reply_text(text, reply_markup=kb_admin_main(), parse_mode='Markdown')
 
 async def delete_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -819,16 +990,25 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == 'admin_open':
         await query.answer()
         db_status = "🟢 متصل" if redis_client else "🔴 قطع"
-        record_count = len(redis_client.keys("snappfood:license:*")) if redis_client else 0
-        text = f"━━━━━━━━━━━━━━━━━━━━━━\n⚙️  *پنل مدیریت*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🗄  وضعیت دیتابیس: {db_status}\n📊  تعداد رکوردها: `{record_count}`\n\nیک گزینه را انتخاب کنید:"
+        stats = get_database_account_stats()
+        text = f"━━━━━━━━━━━━━━━━━━━━━━\n⚙️  *پنل مدیریت*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🗄  وضعیت دیتابیس: {db_status}\n📊  مجموع رکوردها: `{stats['total']}`\n🟠  اکانت‌های خام: `{stats['raw']}`\n🔵  اکانت‌های قدیمی: `{stats['old']}`\n\nیک گزینه را انتخاب کنید:"
         await query.edit_message_text(text, reply_markup=kb_admin_main(), parse_mode='Markdown')
     elif not redis_client:
         await query.answer("❌ دیتابیس متصل نیست!", show_alert=True)
     elif query.data == 'admin_stats':
         await query.answer()
-        keys = redis_client.keys("snappfood:license:*")
-        count = len(keys)
-        await query.edit_message_text(f"━━━━━━━━━━━━━━━━━━━━━━\n📊  *آمار دیتابیس*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🗄  تعداد لایسنس‌ها: `{count}`\n\n🗑  برای حذف:\n`/delete BARANLINK-XXXX-XXXX`", parse_mode='Markdown', reply_markup=kb_back_to_admin())
+        stats = get_database_account_stats()
+        await query.edit_message_text(
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊  *آمار دیتابیس*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🗄  مجموع لایسنس‌ها: `{stats['total']}`\n"
+            f"🟠  اکانت‌های خام (raw): `{stats['raw']}`\n"
+            f"🔵  اکانت‌های قدیمی (old): `{stats['old']}`\n\n"
+            f"🗑  برای حذف:\n`/delete BARANLINK-XXXX-XXXX`",
+            parse_mode='Markdown',
+            reply_markup=kb_back_to_admin()
+        )
     elif query.data == 'admin_extract':
         keys = redis_client.keys("snappfood:license:*")
         if not keys:
@@ -853,17 +1033,36 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("⚠️ دیتابیس خالی است!", show_alert=True)
             return
         await query.answer("درحال آماده‌سازی گزارش...")
-        lines = ["گزارش ارتباطات سیستمی", f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "=" * 60, ""]
+        records_by_type = {"raw": [], "old": []}
         for k in keys:
             try:
-                data = json.loads(redis_client.get(k))
+                raw = redis_client.get(k)
+                data = json.loads(raw) if raw else {}
+                records_by_type[get_account_type(data)].append((k, data))
+            except Exception:
+                records_by_type["raw"].append((k, {}))
+
+        lines = [
+            "گزارش ارتباطات سیستمی",
+            f"تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "=" * 60,
+            ""
+        ]
+        for account_type, title in (("raw", "اکانت‌های خام (raw)"), ("old", "اکانت‌های قدیمی (old)")):
+            records = records_by_type[account_type]
+            lines.extend([
+                f"########## {title} ##########",
+                f"تعداد: {len(records)}",
+                ""
+            ])
+            for k, data in records:
                 lines.append(f"لایسنس:        {data.get('license_key', k.split(':')[-1])}")
                 lines.append(f"شماره موبایل:  {data.get('phone_number', 'نامشخص')}")
                 lines.append(f"Access Token:  {data.get('access_token', 'ندارد')}")
                 lines.append(f"Refresh Token: {data.get('refresh_token', 'ندارد')}")
                 lines.append(f"آخرین بروزرسانی: {data.get('updated_at', 'نامشخص')}")
                 lines.append("-" * 60)
-            except Exception: pass
+            lines.append("")
         doc = io.BytesIO("\n".join(lines).encode('utf-8'))
         doc.name = f"System_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
         await query.message.reply_document(doc, caption=f"🔑  *گزارش کامل ارتباطات*\n📊  رکوردها: `{len(keys)}`\n\n⚠️ مراقب این فایل باشید.", parse_mode='Markdown')
@@ -874,18 +1073,20 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         asyncio.ensure_future(process_database_rebuild(query.message.chat_id, context.bot))
-    elif query.data == 'admin_discount_check':
+    elif query.data in {'admin_discount_check_raw', 'admin_discount_check_old'}:
+        account_type = "old" if query.data.endswith("_old") else "raw"
+        title = "خطوط قدیمی" if account_type == "old" else "خطوط خام"
         await query.answer("چکر تخفیف شروع شد.")
-        await query.edit_message_text("🎁  *بررسی تخفیف‌ها فعال شد*\nپس از پایان فایل گزارش ارسال خواهد شد.", parse_mode='Markdown')
-        asyncio.ensure_future(process_discount_check(query.message.chat_id, context.bot))
+        await query.edit_message_text(f"🎁  *بررسی تخفیف {title} فعال شد*\nپس از پایان فایل گزارش ارسال خواهد شد.", parse_mode='Markdown')
+        asyncio.ensure_future(process_discount_check(query.message.chat_id, context.bot, account_type))
     elif query.data == 'admin_delete_hint':
         await query.answer()
         await query.message.reply_text("🗑  *حذف لایسنس:*\n\n`/delete BARANLINK-XXXX-XXXX`", parse_mode='Markdown')
     elif query.data == 'admin_back':
         await query.answer()
         db_status = "🟢 متصل" if redis_client else "🔴 قطع"
-        record_count = len(redis_client.keys("snappfood:license:*")) if redis_client else 0
-        text = f"━━━━━━━━━━━━━━━━━━━━━━\n⚙️  *پنل مدیریت*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🗄  وضعیت دیتابیس: {db_status}\n📊  تعداد رکوردها: `{record_count}`\n\nیک گزینه را انتخاب کنید:"
+        stats = get_database_account_stats()
+        text = f"━━━━━━━━━━━━━━━━━━━━━━\n⚙️  *پنل مدیریت*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🗄  وضعیت دیتابیس: {db_status}\n📊  مجموع رکوردها: `{stats['total']}`\n🟠  اکانت‌های خام: `{stats['raw']}`\n🔵  اکانت‌های قدیمی: `{stats['old']}`\n\nیک گزینه را انتخاب کنید:"
         await query.edit_message_text(text, reply_markup=kb_admin_main(), parse_mode='Markdown')
 
 # ======================== اجرای همزمان ربات + وب‌سرور ========================
@@ -894,6 +1095,29 @@ async def run_bot():
         logger.critical("❌ TELEGRAM_BOT_TOKEN تنظیم نشده است!")
         return
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    old_license_conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(old_license_start, pattern='^admin_old_license$')
+        ],
+        states={
+            OLD_ASK_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, old_ask_phone),
+                CallbackQueryHandler(cancel_action, pattern='^cancel$')
+            ],
+            OLD_ASK_CODE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, old_ask_code),
+                CallbackQueryHandler(old_resend_code_callback, pattern='^old_resend_code$'),
+                CallbackQueryHandler(cancel_action, pattern='^cancel$')
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel_action),
+            CallbackQueryHandler(exit_to_admin, pattern='^admin_open$')
+        ],
+        allow_reentry=True,
+    )
+    application.add_handler(old_license_conv_handler)
+
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
