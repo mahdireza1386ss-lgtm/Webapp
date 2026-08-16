@@ -167,6 +167,8 @@ def send_express_code(phone_number: str, device_uid: str) -> dict:
     for attempt in range(3):
         try:
             res = requests.post(url, params=params, data=payload, headers=EXPRESS_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            if res.status_code == 424:
+                return {'status': False, 'error': 'خطای ۴۲۴: نیاز به پروکسی است'}
             try:
                 return res.json()
             except ValueError:
@@ -183,6 +185,8 @@ def verify_express_code(phone_number: str, code: str, device_uid: str) -> dict:
     for attempt in range(3):
         try:
             res = requests.post(url, params=params, data=payload, headers=EXPRESS_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            if res.status_code == 424:
+                return {'http_status': 424, 'status': False, 'error': 'خطای ۴۲۴: نیاز به پروکسی است'}
             try:
                 data = res.json()
                 data['http_status'] = res.status_code
@@ -201,6 +205,8 @@ def register_express_user(phone_number: str, code: str, device_uid: str, first_n
     for attempt in range(3):
         try:
             res = requests.post(url, params=params, data=payload, headers=EXPRESS_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            if res.status_code == 424:
+                return {'status': False, 'error': 'خطای ۴۲۴: نیاز به پروکسی است'}
             try:
                 return res.json()
             except ValueError:
@@ -219,6 +225,8 @@ def send_food_code(phone_number: str) -> dict:
     for attempt in range(3):
         try:
             response = requests.post(url, json=payload, headers=BASE_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            if response.status_code == 424:
+                return {'status': False, 'error': 'خطای ۴۲۴: نیاز به پروکسی است'}
             try:
                 return response.json()
             except ValueError:
@@ -241,6 +249,8 @@ def verify_food_code(phone_number: str, code: str, device_uid: str) -> dict:
     for attempt in range(3):
         try:
             response = requests.post(url, json=payload, headers=BASE_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            if response.status_code == 424:
+                return {'http_status': 424, 'error': 'خطای ۴۲۴: نیاز به پروکسی است'}
             try:
                 data = response.json()
                 data['http_status'] = response.status_code
@@ -266,6 +276,8 @@ def register_food_user(phone_number: str, code: str, device_uid: str, first_name
     for attempt in range(3):
         try:
             response = requests.post(url, json=payload, headers=BASE_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=15)
+            if response.status_code == 424:
+                return {'status': False, 'error': 'خطای ۴۲۴: نیاز به پروکسی است'}
             try:
                 return response.json()
             except ValueError:
@@ -290,6 +302,8 @@ def refresh_short_token(short_refresh_token: str) -> dict:
     for attempt in range(3):
         try:
             res = requests.post("https://user.snappfood.ir/v1/auth/token", json=payload, headers=headers, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=20)
+            if res.status_code == 424:
+                return {'status': False, 'error': 'خطای ۴۲۴: نیاز به پروکسی است'}
             try:
                 data = res.json()
             except ValueError:
@@ -313,6 +327,8 @@ def exchange_food_token_for_market_token(access_token: str, device_uid: str) -> 
     params = {"token": access_token, "sso_channel": SNAPP_MARKET_SSO_CHANNEL, **_get_express_params(device_uid)}
     try:
         response = requests.get(f"{SNAPP_MARKET_BASE_URL}/mobile/v2/user/snapp-sso", params=params, headers=EXPRESS_HEADERS, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=20)
+        if response.status_code == 424:
+            return {"status": False, "retryable": False, "error_code": "خطای ۴۲۴ (نیاز به پروکسی است)"}
         if response.status_code != 200: return {"status": False, "retryable": response.status_code in {401, 403, 502}, "error_code": f"sso_http_{response.status_code}"}
         try:
             payload = response.json() or {}
@@ -332,6 +348,8 @@ def fetch_market_vouchers(market_access_token: str, device_uid: str) -> dict:
         for page in range(1, DISCOUNT_CHECK_MAX_PAGES + 1):
             params = {"filterType": "all", "page": page, "pageSize": 10}
             response = requests.get(f"{SNAPP_MARKET_BASE_URL}/belladonna/api/v1/vouchers", params=params, headers=headers, proxies=SNAPPFOOD_PROXIES, verify=False, timeout=20)
+            if response.status_code == 424:
+                return {"status": False, "retryable": False, "error_code": "خطای ۴۲۴ (نیاز به پروکسی است)"}
             if response.status_code != 200: return {"status": False, "retryable": response.status_code in {401, 403, 502}, "error_code": f"voucher_http_{response.status_code}"}
             try: payload = response.json() or {}
             except ValueError: return {"status": False, "retryable": True, "error_code": "voucher_invalid_json"}
@@ -436,39 +454,61 @@ async def safe_edit_discount_progress(progress_message, text: str) -> None:
     except Exception as e:
         logger.warning(f"به‌روزرسانی گزارش زنده چکر ناموفق بود: {e}")
 
-async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
+async def process_discount_check(chat_id: int, bot, account_type: str, mode: str = "all") -> None:
     async with discount_check_lock:
         if not redis_client:
             await bot.send_message(chat_id=chat_id, text="❌ دیتابیس ردیس متصل نیست!")
             return
+            
         all_keys = redis_client.keys("snappfood:license:*")
         keys = []
+        now_time = datetime.now()
+
+        # فیلتر کردن اکانت‌ها بر اساس حالت انتخاب شده (همه یا اخیر)
         for key in all_keys:
             try:
                 raw = redis_client.get(key)
                 record = json.loads(raw) if raw else {}
                 if get_account_type(record) == account_type:
-                    keys.append(key)
+                    if mode == "recent":
+                        created_at_str = record.get("created_at")
+                        if created_at_str:
+                            created_time = datetime.strptime(created_at_str, '%Y-%m-%d %H:%M:%S')
+                            if (now_time - created_time).total_seconds() <= 86400:
+                                keys.append(key)
+                    else:
+                        keys.append(key)
             except Exception:
-                if account_type == "raw":
+                if account_type == "raw" and mode == "all":
                     keys.append(key)
+
+        # اگر هیچ خطی یافت نشد
         if not keys:
             title = "خام" if account_type == "raw" else "قدیمی"
-            await bot.send_message(chat_id=chat_id, text=f"ℹ️ هیچ لایسنس اکانت {title} برای بررسی در دیتابیس نیست.")
+            if mode == "recent":
+                await bot.send_message(chat_id=chat_id, text=f"ℹ️ *اخیراً (در ۲۴ ساعت گذشته) هیچ خط {title} جدیدی اضافه نشده است.*", parse_mode='Markdown')
+            else:
+                await bot.send_message(chat_id=chat_id, text=f"ℹ️ هیچ لایسنس اکانت {title} برای بررسی در دیتابیس نیست.")
             return
+
         title = "خطوط خام" if account_type == "raw" else "خطوط قدیمی"
+        check_mode_text = "تازه‌ها (۲۴ ساعت اخیر)" if mode == "recent" else "همه خطوط"
+        
         progress_message = await bot.send_message(
             chat_id=chat_id,
             text=(
                 f"🔎 *گزارش زنده چکر تخفیف ({title})*\n\n"
+                f"حالت بررسی: `{check_mode_text}`\n"
                 "وضعیت: در صف بررسی\n"
                 f"پیشرفت: `0/{len(keys)}`\n"
                 "درخواست‌ها با فاصله‌ی ۸ تا ۱۵ ثانیه ارسال می‌شوند."
             ),
             parse_mode="Markdown"
         )
+        
         results = []
         checked_count = 0
+        
         for key in keys:
             raw = None
             record = {}
@@ -477,6 +517,7 @@ async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
                 progress_message,
                 (
                     f"🔎 *گزارش زنده چکر تخفیف ({title})*\n\n"
+                    f"حالت بررسی: `{check_mode_text}`\n"
                     f"وضعیت: در حال بررسی `#{checked_count + 1}`\n"
                     f"پیشرفت: `{checked_count}/{len(keys)}`\n"
                     f"لایسنس فعلی: `{license_key}`"
@@ -508,6 +549,7 @@ async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
                 progress_message,
                 (
                     f"🔎 *گزارش زنده چکر تخفیف ({title})*\n\n"
+                    f"حالت بررسی: `{check_mode_text}`\n"
                     f"وضعیت: {latest_status}\n"
                     f"پیشرفت: `{checked_count}/{len(keys)}`\n"
                     f"آخرین لایسنس: `{_text_value(latest_result.get('license_key'))}`\n"
@@ -521,6 +563,7 @@ async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
                     progress_message,
                     (
                         f"🔎 *گزارش زنده چکر تخفیف ({title})*\n\n"
+                        f"حالت بررسی: `{check_mode_text}`\n"
                         f"پیشرفت: `{checked_count}/{len(keys)}`\n"
                         f"آخرین لایسنس: `{_text_value(latest_result.get('license_key'))}`\n"
                         f"⏳ مکث امنیتی حدود `{int(delay)} ثانیه` تا درخواست بعدی..."
@@ -530,7 +573,7 @@ async def process_discount_check(chat_id: int, bot, account_type: str) -> None:
         content = build_discount_report(results, account_type)
         doc = io.BytesIO(content.encode("utf-8"))
         doc.name = f"Discount_Check_{account_type}_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-        await bot.send_document(chat_id=chat_id, document=doc, caption=f"✅ *بررسی تخفیف‌های {title} پایان یافت*\nلایسنس‌های بررسی‌شده: `{len(results)}`\nتعداد تخفیف‌ها: `{sum(len(item.get('vouchers', [])) for item in results)}`", parse_mode="Markdown")
+        await bot.send_document(chat_id=chat_id, document=doc, caption=f"✅ *بررسی تخفیف‌های {title} پایان یافت*\nحالت بررسی: `{check_mode_text}`\nلایسنس‌های بررسی‌شده: `{len(results)}`\nتعداد کل تخفیف‌ها: `{sum(len(item.get('vouchers', [])) for item in results)}`", parse_mode="Markdown")
         await bot.send_message(chat_id=chat_id, text="⚙️ *پنل مدیریت*\n\nپنل برای دسترسی سریع دوباره در دسترس است:", reply_markup=kb_admin_main(), parse_mode="Markdown")
 
 async def process_database_rebuild(chat_id: int, bot):
@@ -613,7 +656,8 @@ def kb_admin_main() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔄  بازسازی اتصال‌ها", callback_data='admin_rebuild')],
         [InlineKeyboardButton("🎁  چکر تخفیف (خطوط خام)", callback_data='admin_discount_check_raw')],
         [InlineKeyboardButton("🎁  چکر تخفیف (خطوط قدیمی)", callback_data='admin_discount_check_old')],
-        [InlineKeyboardButton("📥  استخراج فایل بکاپ", callback_data='admin_extract'), InlineKeyboardButton("🗑  حذف لایسنس", callback_data='admin_delete_hint')]
+        [InlineKeyboardButton("🗑  حذف گروهی خطوط قدیمی", callback_data='batch_delete_old_start')],
+        [InlineKeyboardButton("📥  استخراج فایل بکاپ", callback_data='admin_extract'), InlineKeyboardButton("🗑  حذف تک لایسنس", callback_data='admin_delete_hint')]
     ])
 
 def kb_back_to_admin() -> InlineKeyboardMarkup:
@@ -624,6 +668,13 @@ def kb_old_resend_step() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔄  ارسال مجدد کد اسنپ‌فود", callback_data='old_resend_code')],
         [InlineKeyboardButton("⚙️  پنل مدیریت", callback_data='admin_open')],
         [InlineKeyboardButton("🚫  لغو عملیات", callback_data='cancel')]
+    ])
+
+def kb_discount_check_options(account_type: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔍  بررسی همه اکانت‌ها (از ابتدا)", callback_data=f'admin_check_all_{account_type}')],
+        [InlineKeyboardButton("🕒  بررسی خطوط اخیر (۲۴ ساعت گذشته)", callback_data=f'admin_check_recent_{account_type}')],
+        [InlineKeyboardButton("🔙  بازگشت به پنل", callback_data='admin_back')]
     ])
 
 # =================================================================
@@ -650,6 +701,7 @@ async def exit_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 # --- مراحل ربات تلگرام ---
 ASK_PHONE, ASK_CODE_STEP_1, ASK_CODE_STEP_2, ASK_NEXT_ACTION = range(4)
 OLD_ASK_PHONE, OLD_ASK_CODE = range(4, 6)
+ASK_BATCH_DELETE_COUNT = 6
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.message.from_user
@@ -791,7 +843,7 @@ async def old_resend_code_callback(update: Update, context: ContextTypes.DEFAULT
             parse_mode='Markdown'
         )
     else:
-        await query.edit_message_text("❌  ارسال مجدد با مشکل مواجه شد.", reply_markup=kb_old_resend_step())
+        await query.edit_message_text(f"❌  ارسال مجدد با مشکل مواجه شد. جزئیات: {res.get('error')}", reply_markup=kb_old_resend_step())
     return OLD_ASK_CODE
 
 async def old_ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -805,13 +857,33 @@ async def old_ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     wait_msg = await update.message.reply_text("⏳  درحال ورود مستقیم به اسنپ‌فود و صدور لایسنس...")
     res = await asyncio.to_thread(verify_food_code, phone_number, code, device_uid)
+    
+    http_status = res.get('http_status', 500)
     data_dict = res.get('data') or {}
-    access_token, refresh_token = data_dict.get('accessToken'), data_dict.get('refreshToken')
+    access_token = data_dict.get('accessToken')
+    refresh_token = data_dict.get('refreshToken')
 
-    if res.get('http_status', 500) != 200 or not access_token:
+    # بررسی وضعیت احراز هویت
+    if http_status == 200:
+        if not access_token:
+            # اگر 200 بود اما توکن نداد، یعنی خط خام است! پس به صورت خودکار ثبت‌نام می‌کنیم
+            f_name, l_name = random.choice(FIRST_NAMES), random.choice(LAST_NAMES)
+            reg_res = await asyncio.to_thread(register_food_user, phone_number, code, device_uid, f_name, l_name)
+            reg_data = reg_res.get('data') or {}
+            access_token = reg_data.get('accessToken')
+            refresh_token = reg_data.get('refreshToken')
+            
+            if not access_token:
+                await wait_msg.delete()
+                await update.message.reply_text(
+                    f"❌ ثبت‌نام خودکار خط خام با مشکل مواجه شد ({reg_res.get('error', 'نامشخص')}). مجدداً تلاش کنید:",
+                    reply_markup=kb_old_resend_step()
+                )
+                return OLD_ASK_CODE
+    else:
         await wait_msg.delete()
         await update.message.reply_text(
-            "⚠️  کد اسنپ‌فود نامعتبر است یا ورود انجام نشد. مجدداً تلاش کنید:",
+            f"⚠️  کد اسنپ‌فود نامعتبر است یا ورود انجام نشد ({res.get('error', 'نامشخص')}). مجدداً تلاش کنید:",
             reply_markup=kb_old_resend_step()
         )
         return OLD_ASK_CODE
@@ -830,7 +902,7 @@ async def old_ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         "created_at": now_str,
         "updated_at": now_str,
         "license_key": license_key,
-        "account_type": "old"
+        "account_type": "old" # در دیتابیس به عنوان old ذخیره می‌شود تا در لیست قدیمی‌ها بماند
     }
     try:
         redis_client.set(
@@ -845,7 +917,7 @@ async def old_ask_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     context.user_data.clear()
     await wait_msg.edit_text(
         "━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✅  *لایسنس اکانت قدیمی با موفقیت ساخته شد!*\n"
+        "✅  *لایسنس با موفقیت ساخته شد!*\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🔑  لایسنس: `{license_key}`\n"
         "🏷  نوع اکانت: `old`\n\n"
@@ -871,7 +943,7 @@ async def resend_code_1_callback(update: Update, context: ContextTypes.DEFAULT_T
     if res.get('status') or res.get('success'):
         await query.edit_message_text(f"🔄  *کد مرحله اول مجدداً ارسال شد*\n\n📲  کد جدید را وارد کنید:", reply_markup=kb_resend_step1(), parse_mode='Markdown')
     else:
-        await query.edit_message_text("❌  ارسال مجدد با مشکل مواجه شد.", reply_markup=kb_resend_step1())
+        await query.edit_message_text(f"❌  ارسال مجدد با مشکل مواجه شد. جزئیات: {res.get('error')}", reply_markup=kb_resend_step1())
     return ASK_CODE_STEP_1
 
 async def ask_code_step_1(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -895,7 +967,7 @@ async def ask_code_step_1(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f_name, l_name = random.choice(FIRST_NAMES), random.choice(LAST_NAMES)
             reg_res = await asyncio.to_thread(register_express_user, phone_number, code, device_uid, f_name, l_name)
             if not reg_res.get('status') and not reg_res.get('success'):
-                await wait_msg.edit_text("❌ ایمن‌سازی اولیه با مشکل مواجه شد. لغو عملیات.")
+                await wait_msg.edit_text(f"❌ ایمن‌سازی اولیه با مشکل مواجه شد ({reg_res.get('error', 'نامشخص')}). لغو عملیات.")
                 return ConversationHandler.END
 
         # حالا که اکانت ایمن شد، وارد مرحله دوم (دریافت اطلاعات اصلی) می‌شویم
@@ -914,11 +986,11 @@ async def ask_code_step_1(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return ASK_CODE_STEP_2
         else:
             await wait_msg.delete()
-            await update.message.reply_text("❌ ارسال کد نهایی با مشکل روبرو شد.", reply_markup=kb_resend_step2())
+            await update.message.reply_text(f"❌ ارسال کد نهایی با مشکل روبرو شد ({food_res.get('error', 'نامشخص')}).", reply_markup=kb_resend_step2())
             return ASK_CODE_STEP_2
     else:
         await wait_msg.delete()
-        await update.message.reply_text("⚠️  کد وارد شده نامعتبر است. مجددا تلاش کنید:", reply_markup=kb_resend_step1())
+        await update.message.reply_text(f"⚠️  کد وارد شده نامعتبر است ({res.get('error', 'نامشخص')}). مجددا تلاش کنید:", reply_markup=kb_resend_step1())
         return ASK_CODE_STEP_1
 
 async def resend_code_2_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -933,7 +1005,7 @@ async def resend_code_2_callback(update: Update, context: ContextTypes.DEFAULT_T
     if res.get('status') or res.get('success'):
         await query.edit_message_text(f"🔄  *کد نهایی مجدداً ارسال شد*\n\n📲  کد جدید را وارد کنید:", reply_markup=kb_resend_step2(), parse_mode='Markdown')
     else:
-        await query.edit_message_text("❌  ارسال مجدد با مشکل مواجه شد.", reply_markup=kb_resend_step2())
+        await query.edit_message_text(f"❌  ارسال مجدد با مشکل مواجه شد. جزئیات: {res.get('error')}", reply_markup=kb_resend_step2())
     return ASK_CODE_STEP_2
 
 async def ask_code_step_2(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -966,11 +1038,11 @@ async def ask_code_step_2(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 await wait_msg.delete()
                 return await _save_and_reply(update, context, phone_number, device_uid, new_access, new_refresh)
             else:
-                await wait_msg.edit_text("❌ صدور لایسنس با مشکل مواجه شد.")
+                await wait_msg.edit_text(f"❌ صدور لایسنس با مشکل مواجه شد ({reg_res.get('error', 'نامشخص')}).")
                 return ConversationHandler.END
     else:
         await wait_msg.delete()
-        await update.message.reply_text("⚠️  کد نهایی نامعتبر است. مجددا بررسی کنید:", reply_markup=kb_resend_step2())
+        await update.message.reply_text(f"⚠️  کد نهایی نامعتبر است ({res.get('error', 'نامشخص')}). مجددا بررسی کنید:", reply_markup=kb_resend_step2())
         return ASK_CODE_STEP_2
 
 async def _save_and_reply(
@@ -1050,6 +1122,76 @@ async def delete_number(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅  لایسنس `{license_key}` حذف شد.", parse_mode='Markdown')
     else:
         await update.message.reply_text(f"⚠️  لایسنس `{license_key}` یافت نشد.", parse_mode='Markdown')
+
+# --- توابع مربوط به حذف گروهی خطوط قدیمی ---
+async def start_batch_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "🗑 *حذف گروهی خطوط قدیمی*\n\n"
+        "لطفاً تعداد خطوط قدیمی (old) که می‌خواهید حذف شوند را وارد کنید:\n"
+        "_(فقط یک عدد انگلیسی بفرستید، مثلاً 50)_\n\n"
+        "⚠️ *توجه:* این عملیات خطوط قدیمی را به ترتیب از **کهنه‌ترین زمان ثبت** (از آخر دیتابیس) حذف می‌کند.",
+        reply_markup=kb_cancel(),
+        parse_mode='Markdown'
+    )
+    return ASK_BATCH_DELETE_COUNT
+
+async def process_batch_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    
+    if not text.isdigit():
+        await update.message.reply_text("⚠️ لطفاً فقط یک عدد معتبر وارد کنید:", reply_markup=kb_cancel())
+        return ASK_BATCH_DELETE_COUNT
+
+    count = int(text)
+    if count <= 0:
+        await update.message.reply_text("⚠️ تعداد باید بیشتر از صفر باشد:", reply_markup=kb_cancel())
+        return ASK_BATCH_DELETE_COUNT
+
+    wait_msg = await update.message.reply_text("⏳ در حال پردازش و حذف...", parse_mode='Markdown')
+
+    if not redis_client:
+        await wait_msg.edit_text("❌ دیتابیس متصل نیست.", reply_markup=kb_admin_main())
+        return ConversationHandler.END
+
+    all_keys = redis_client.keys("snappfood:license:*")
+    old_accounts = []
+    
+    for key in all_keys:
+        try:
+            raw = redis_client.get(key)
+            record = json.loads(raw) if raw else {}
+            if get_account_type(record) == "old":
+                # پیدا کردن تاریخ ثبت خط
+                created_at = record.get("created_at", "")
+                old_accounts.append((key, created_at))
+        except Exception:
+            pass
+
+    if not old_accounts:
+        await wait_msg.edit_text("ℹ️ هیچ خط قدیمی (old) در دیتابیس یافت نشد.", reply_markup=kb_admin_main())
+        return ConversationHandler.END
+
+    # مرتب‌سازی خطوط بر اساس زمان ثبت (از کهنه‌ترین به جدیدترین)
+    old_accounts.sort(key=lambda x: x[1])
+
+    to_delete = old_accounts[:count]
+    deleted_count = 0
+    
+    for key, _ in to_delete:
+        if redis_client.delete(key):
+            deleted_count += 1
+
+    await wait_msg.edit_text(
+        f"✅ *عملیات حذف با موفقیت انجام شد*\n\n"
+        f"تعداد کل خطوط قدیمی در دیتابیس: `{len(old_accounts)}`\n"
+        f"تعداد درخواست شده برای حذف: `{count}`\n"
+        f"تعداد حذف شده (از کهنه‌ترین زمان ثبت): `{deleted_count}`",
+        parse_mode='Markdown',
+        reply_markup=kb_admin_main()
+    )
+    return ConversationHandler.END
 
 async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1165,9 +1307,28 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data in {'admin_discount_check_raw', 'admin_discount_check_old'}:
         account_type = "old" if query.data.endswith("_old") else "raw"
         title = "خطوط قدیمی" if account_type == "old" else "خطوط خام"
-        await query.answer("چکر تخفیف شروع شد.")
-        await query.edit_message_text(f"🎁  *بررسی تخفیف {title} فعال شد*\nپس از پایان فایل گزارش ارسال خواهد شد.", parse_mode='Markdown')
-        asyncio.ensure_future(process_discount_check(query.message.chat_id, context.bot, account_type))
+        await query.answer()
+        await query.edit_message_text(
+            f"❓ *تنظیمات چکر تخفیف ({title})*\n\n"
+            "مایلید کدام اکانت‌ها بررسی شوند؟\n"
+            "برای جلوگیری از بلاک شدن و سرعت بیشتر، توصیه می‌شود فقط «خطوط اخیر» را بررسی کنید.",
+            reply_markup=kb_discount_check_options(account_type),
+            parse_mode='Markdown'
+        )
+    elif query.data.startswith('admin_check_'):
+        parts = query.data.split('_')
+        mode = parts[2]
+        account_type = parts[3]
+        title = "خطوط قدیمی" if account_type == "old" else "خطوط خام"
+        await query.answer("چکر تخفیف در پس‌زمینه استارت خورد.")
+        mode_text = "تازه‌ها (۲۴ ساعت)" if mode == "recent" else "همه خطوط"
+        await query.edit_message_text(
+            f"🎁 *بررسی تخفیف {title} فعال شد*\n\n"
+            f"حالت بررسی: `{mode_text}`\n"
+            "پس از پایان، فایل گزارش ارسال خواهد شد.", 
+            parse_mode='Markdown'
+        )
+        asyncio.ensure_future(process_discount_check(query.message.chat_id, context.bot, account_type, mode))
     elif query.data == 'admin_delete_hint':
         await query.answer()
         await query.message.reply_text("🗑  *حذف لایسنس:*\n\n`/delete BARANLINK-XXXX-XXXX`", parse_mode='Markdown')
@@ -1184,6 +1345,27 @@ async def run_bot():
         logger.critical("❌ TELEGRAM_BOT_TOKEN تنظیم نشده است!")
         return
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # کنترلر مربوط به حذف گروهی خطوط قدیمی
+    batch_delete_conv_handler = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_batch_delete, pattern='^batch_delete_old_start$')
+        ],
+        states={
+            ASK_BATCH_DELETE_COUNT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_batch_delete),
+                CallbackQueryHandler(cancel_action, pattern='^cancel$')
+            ]
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel_action),
+            CommandHandler("start", start),
+            CallbackQueryHandler(exit_to_admin, pattern='^admin_open$')
+        ],
+        allow_reentry=True,
+    )
+    application.add_handler(batch_delete_conv_handler)
+    
     old_license_conv_handler = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(old_license_start, pattern='^admin_old_license$')
@@ -1223,10 +1405,12 @@ async def run_bot():
         allow_reentry=True,
     )
     application.add_handler(conv_handler)
+    
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("delete", delete_number))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CallbackQueryHandler(admin_callbacks, pattern="^admin_"))
+    
     logger.info("🤖 ربات در حال راه‌اندازی...")
     await application.initialize()
     await application.start()
