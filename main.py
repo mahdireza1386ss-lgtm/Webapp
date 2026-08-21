@@ -650,14 +650,13 @@ def kb_next_or_finish() -> InlineKeyboardMarkup:
 
 def kb_admin_main() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊  آمار دیتابیس", callback_data='admin_stats'), InlineKeyboardButton("🔑  استخراج گزارش کامل", callback_data='admin_extract_tokens')],
-        [InlineKeyboardButton("➕  تولید لایسنس جدید", callback_data='admin_new_license')],
-        [InlineKeyboardButton("➕  ثبت لایسنس اکانت قدیمی", callback_data='admin_old_license')],
+        [InlineKeyboardButton("📊  آمار دیتابیس", callback_data='admin_stats'), InlineKeyboardButton("🔑  گزارش کامل", callback_data='admin_extract_tokens')],
+        [InlineKeyboardButton("➕  تولید لایسنس جدید", callback_data='admin_new_license'), InlineKeyboardButton("➕  ثبت لایسنس قدیمی", callback_data='admin_old_license')],
+        [InlineKeyboardButton("📥  دریافت ۲۰تایی خام", callback_data='admin_get_list_raw'), InlineKeyboardButton("📥  دریافت ۲۰تایی قدیمی", callback_data='admin_get_list_old')],
         [InlineKeyboardButton("🔄  بازسازی اتصال‌ها", callback_data='admin_rebuild')],
-        [InlineKeyboardButton("🎁  چکر تخفیف (خطوط خام)", callback_data='admin_discount_check_raw')],
-        [InlineKeyboardButton("🎁  چکر تخفیف (خطوط قدیمی)", callback_data='admin_discount_check_old')],
+        [InlineKeyboardButton("🎁  چکر تخفیف (خام)", callback_data='admin_discount_check_raw'), InlineKeyboardButton("🎁  چکر تخفیف (قدیمی)", callback_data='admin_discount_check_old')],
         [InlineKeyboardButton("🗑  حذف گروهی خطوط قدیمی", callback_data='batch_delete_old_start')],
-        [InlineKeyboardButton("📥  استخراج فایل بکاپ", callback_data='admin_extract'), InlineKeyboardButton("🗑  حذف تک لایسنس", callback_data='admin_delete_hint')]
+        [InlineKeyboardButton("📥  فایل بکاپ", callback_data='admin_extract'), InlineKeyboardButton("🗑  حذف تک لایسنس", callback_data='admin_delete_hint')]
     ])
 
 def kb_back_to_admin() -> InlineKeyboardMarkup:
@@ -1163,7 +1162,6 @@ async def process_batch_delete(update: Update, context: ContextTypes.DEFAULT_TYP
             raw = redis_client.get(key)
             record = json.loads(raw) if raw else {}
             if get_account_type(record) == "old":
-                # پیدا کردن تاریخ ثبت خط
                 created_at = record.get("created_at", "")
                 old_accounts.append((key, created_at))
         except Exception:
@@ -1173,7 +1171,6 @@ async def process_batch_delete(update: Update, context: ContextTypes.DEFAULT_TYP
         await wait_msg.edit_text("ℹ️ هیچ خط قدیمی (old) در دیتابیس یافت نشد.", reply_markup=kb_admin_main())
         return ConversationHandler.END
 
-    # مرتب‌سازی خطوط بر اساس زمان ثبت (از کهنه‌ترین به جدیدترین)
     old_accounts.sort(key=lambda x: x[1])
 
     to_delete = old_accounts[:count]
@@ -1205,8 +1202,69 @@ async def admin_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         stats = get_database_account_stats()
         text = f"━━━━━━━━━━━━━━━━━━━━━━\n⚙️  *پنل مدیریت*\n━━━━━━━━━━━━━━━━━━━━━━\n\n🗄  وضعیت دیتابیس: {db_status}\n📊  مجموع رکوردها: `{stats['total']}`\n🟠  اکانت‌های خام: `{stats['raw']}`\n🔵  اکانت‌های قدیمی: `{stats['old']}`\n\nیک گزینه را انتخاب کنید:"
         await query.edit_message_text(text, reply_markup=kb_admin_main(), parse_mode='Markdown')
+        
     elif not redis_client:
         await query.answer("❌ دیتابیس متصل نیست!", show_alert=True)
+        
+    # --- دکمه‌های دریافت لیست 20 تایی ---
+    elif query.data in ['admin_get_list_raw', 'admin_get_list_old']:
+        account_type = "raw" if query.data == 'admin_get_list_raw' else "old"
+        title_fa = "خام" if account_type == "raw" else "قدیمی"
+        await query.answer("در حال آماده‌سازی لیست...")
+        
+        all_keys = redis_client.keys("snappfood:license:*")
+        accounts = []
+        for key in all_keys:
+            try:
+                raw = redis_client.get(key)
+                record = json.loads(raw) if raw else {}
+                if get_account_type(record) == account_type:
+                    # اگر کلید لایسنس در جیسون نبود، آن را از اسم کلید ردیس برمی‌داریم
+                    if "license_key" not in record:
+                        record["license_key"] = key.split(":")[-1]
+                    accounts.append(record)
+            except Exception:
+                pass
+        
+        if not accounts:
+            await query.edit_message_text(f"ℹ️ هیچ خط {title_fa} در دیتابیس یافت نشد.", reply_markup=kb_admin_main())
+            return
+        
+        # مرتب‌سازی بر اساس تاریخ ساخت (از قدیمی‌ترین به جدیدترین)
+        accounts.sort(key=lambda x: x.get("created_at", ""))
+        
+        chunk_size = 20
+        chunks = [accounts[i:i + chunk_size] for i in range(0, len(accounts), chunk_size)]
+        
+        await query.edit_message_text(
+            f"✅ در حال ارسال لیست خطوط `{title_fa}`...\n\n"
+            f"مجموع: `{len(accounts)}` عدد\n"
+            f"تعداد دسته‌ها: `{len(chunks)}`\n"
+            "⏳ لطفاً چند لحظه صبر کنید...",
+            parse_mode='Markdown'
+        )
+        
+        # ارسال دسته‌ها به صورت HTML تا بلوک‌های کد به درستی کپی شوند
+        for idx, chunk in enumerate(chunks, 1):
+            msg = f"📦 <b>دسته {idx}</b> (خطوط {title_fa})\n"
+            msg += "━━━━━━━━━━━━━━━━━━━━━━\n"
+            msg += "📱 <b>شماره موبایل‌ها:</b>\n"
+            for i, acc in enumerate(chunk, 1):
+                msg += f"{i}. {acc.get('phone_number', 'نامشخص')}\n"
+            
+            msg += "\n🔑 <b>لایسنس‌ها (برای کپی یک‌جا روی کادر زیر کلیک کنید):</b>\n"
+            licenses_str = "\n".join([acc.get("license_key") for acc in chunk])
+            msg += f"<code>{licenses_str}</code>"
+            
+            await context.bot.send_message(chat_id=query.message.chat_id, text=msg, parse_mode='HTML')
+            await asyncio.sleep(0.5) # تاخیر برای جلوگیری از محدودیت تلگرام
+            
+        await context.bot.send_message(
+            chat_id=query.message.chat_id, 
+            text="✅ ارسال لیست به پایان رسید.", 
+            reply_markup=kb_admin_main()
+        )
+        
     elif query.data == 'admin_stats':
         await query.answer()
         stats = get_database_account_stats()
